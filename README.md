@@ -4,7 +4,7 @@
 
 ## 🧩 機能
 
-** 以下1,2,3の設定は実行ファイルから相対パスでそれぞれ' ./Config/backup_config.json ',' ./Config/schedule_config.json ',' ./Config/ignore_config.json 'として保存されています。 **
+** 以下1,2,3の設定は実行ファイルから相対パスでそれぞれ './Config/backup_config.json' ,' ./Config/schedule_config.json ',' ./Config/ignore_config.json 'として保存されています。 **
 
 1.バックアップ設定
 
@@ -40,7 +40,7 @@
 
   - **ファイル**、**フォルダ**の除外設定が可能です。
   
-  - 直接下の記入欄に** .tmp **などを打つことで拡張子自体の除外も可。
+  - 直接下の記入欄に '.tmp' などを打つことで拡張子自体の除外も可。
   
 
 ## 📦 インストール方法
