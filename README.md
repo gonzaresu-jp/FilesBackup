@@ -47,7 +47,7 @@
 
   -右側にある**Releases**から**Latest**バージョンを選択してそのページに飛んでください。
   
-  (https://github.com/gonzaresu-jp/FilesBackup/releases/tag/Backup)←このリンクからも飛べます。
+  ( https://github.com/gonzaresu-jp/FilesBackup/releases/tag/Backup )←このリンクからも飛べます。
   
   -そこにある**FilesBackup.zip**をクリックしてダウンロードしてください。
   
