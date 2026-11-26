@@ -68,13 +68,37 @@ namespace FilesBackup.Services
             }
         }
 
-        public int ExecuteAll()
+        // コピー先がコピー元（または同一）の配下になっている設定を列挙する（保存時・実行時の警告用）
+        public static List<string> FindSelfCopyErrors(IEnumerable<BackupTask> tasks)
+        {
+            var errors = new List<string>();
+            foreach (var task in tasks)
+            {
+                if (string.IsNullOrWhiteSpace(task.Source) || string.IsNullOrWhiteSpace(task.Destination))
+                    continue;
+
+                try
+                {
+                    if (IsSameOrInside(task.Destination, task.Source))
+                        errors.Add($"コピー先がコピー元の配下になっています: {task.Source} → {task.Destination}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"パスが不正です: {task.Source} → {task.Destination} ({ex.Message})");
+                }
+            }
+            return errors;
+        }
+
+        public int ExecuteAll(CancellationToken cancellationToken = default)
         {
             int totalCopied = 0;
             var ignores = IgnorePaths.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
 
             foreach (var task in Tasks)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 try
                 {
                     if (string.IsNullOrWhiteSpace(task.Source) || string.IsNullOrWhiteSpace(task.Destination))
@@ -97,9 +121,14 @@ namespace FilesBackup.Services
                         continue;
                     }
 
-                    int copied = Copy(task.Source, task.Destination, ignores);
+                    int copied = Copy(task.Source, task.Destination, ignores, cancellationToken);
                     totalCopied += copied;
                     Log($"[{task.Source} → {task.Destination}] {copied} 個コピーしました");
+                }
+                catch (OperationCanceledException)
+                {
+                    Log("[CANCEL] ユーザーによりバックアップを中止しました");
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -109,12 +138,14 @@ namespace FilesBackup.Services
             return totalCopied;
         }
 
-        private int Copy(string src, string dst, IReadOnlyList<string> ignores)
+        private int Copy(string src, string dst, IReadOnlyList<string> ignores, CancellationToken cancellationToken)
         {
             int count = 0;
 
             foreach (var file in EnumerateFilesSafe(src, ignores))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 string relative = Path.GetRelativePath(src, file);
                 string extension = Path.GetExtension(file).ToLowerInvariant();
 

@@ -1,4 +1,4 @@
-using System.Text.Json;
+ï»¿using System.Text.Json;
 using FilesBackup.Models;
 using FilesBackup.Services;
 using Microsoft.Win32.TaskScheduler;
@@ -36,6 +36,9 @@ namespace FilesBackup
 
         private Panel? taskHeader;
 
+        // å®Ÿè¡Œä¸­ã®ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—ã®ã‚­ãƒ£ãƒ³ã‚»ãƒ«ç”¨ï¼ˆnull ãªã‚‰æœªå®Ÿè¡Œï¼‰
+        private CancellationTokenSource? _backupCts;
+
 
 
         public Form1()
@@ -55,7 +58,7 @@ namespace FilesBackup
 
             defaultButtonColor = btnSave.BackColor;
 
-            // ‚±‚±‚©‚çƒCƒxƒ“ƒgw“Ç
+            // ã“ã“ã‹ã‚‰ã‚¤ãƒ™ãƒ³ãƒˆè³¼èª­
             flowPanel.ControlAdded += (s, e) => MarkTaskModified();
             flowPanel.ControlRemoved += (s, e) => MarkTaskModified();
 
@@ -69,16 +72,16 @@ namespace FilesBackup
             btnAddIgnoreExtension.Click += (s, e) => MarkIgnoreModified();
             btnRemoveIgnoreItem.Click += (s, e) => MarkIgnoreModified();
 
-            // š ‰Šú‰»Š®—¹B‚±‚±ˆÈ~‚ÌUIƒCƒxƒ“ƒg‚¾‚¯“_“”‘ÎÛ
+            // â˜… åˆæœŸåŒ–å®Œäº†ã€‚ã“ã“ä»¥é™ã®UIã‚¤ãƒ™ãƒ³ãƒˆã ã‘ç‚¹ç¯å¯¾è±¡
             _initializing = false;
 
-            // ”O‚Ì‚½‚ß‹Šo‚ğŠù’è‚É–ß‚·
+            // å¿µã®ãŸã‚è¦–è¦šã‚’æ—¢å®šã«æˆ»ã™
             ResetButtonStyle(btnSaveSchedule);
             ResetButtonStyle(btnSaveIgnore);
         }
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            // ƒAƒvƒŠ‘S‘Ì‚ğI—¹‚³‚¹‚¸AƒEƒBƒ“ƒhƒE‚¾‚¯”ñ•\¦‚É‚·‚é
+            // ã‚¢ãƒ—ãƒªå…¨ä½“ã‚’çµ‚äº†ã•ã›ãšã€ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã ã‘éè¡¨ç¤ºã«ã™ã‚‹
             e.Cancel = true;
             this.Hide();
         }
@@ -111,13 +114,13 @@ namespace FilesBackup
             button.ForeColor = ColorTranslator.FromHtml("#AA8833"); ;
             button.Font = new Font(button.Font, FontStyle.Bold);
         }
-        // ResetButtonStyle ‚ğ’u‚«Š·‚¦
+        // ResetButtonStyle ã‚’ç½®ãæ›ãˆ
         private void ResetButtonStyle(Button button)
         {
             button.FlatStyle = FlatStyle.Standard;
             button.UseVisualStyleBackColor = true;
-            button.FlatAppearance.BorderSize = 0;                         // d—v
-            button.FlatAppearance.BorderColor = SystemColors.Control;     // d—v
+            button.FlatAppearance.BorderSize = 0;                         // é‡è¦
+            button.FlatAppearance.BorderColor = SystemColors.Control;     // é‡è¦
             button.ForeColor = SystemColors.ControlText;
             button.Font = new Font(button.Font, FontStyle.Regular);
             button.Invalidate();
@@ -127,12 +130,13 @@ namespace FilesBackup
         private void InitializeTrayIcon()
         {
             trayMenu = new ContextMenuStrip();
-            trayMenu.Items.Add("ŠJ‚­", null, (s, e) => ShowWindow());
-            trayMenu.Items.Add("I—¹", null, (s, e) =>
+            trayMenu.Items.Add("é–‹ã", null, (s, e) => ShowWindow());
+            trayMenu.Items.Add("ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—ã‚’ä¸­æ­¢", null, (s, e) => _backupCts?.Cancel());
+            trayMenu.Items.Add("çµ‚äº†", null, (s, e) =>
             {
                 trayIcon.Visible = false;
-                trayIcon.Dispose(); // ƒgƒŒƒCƒAƒCƒRƒ“‚ğ–¾¦“I‚É”jŠü
-                Environment.Exit(0); // ŠmÀ‚ÉƒvƒƒZƒXI—¹
+                trayIcon.Dispose(); // ãƒˆãƒ¬ã‚¤ã‚¢ã‚¤ã‚³ãƒ³ã‚’æ˜ç¤ºçš„ã«ç ´æ£„
+                Environment.Exit(0); // ç¢ºå®Ÿã«ãƒ—ãƒ­ã‚»ã‚¹çµ‚äº†
             });
 
             trayIcon = new NotifyIcon
@@ -181,7 +185,7 @@ namespace FilesBackup
             }
             catch (Exception ex)
             {
-                MessageBox.Show("İ’èƒtƒ@ƒCƒ‹‚Ì“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½: " + ex.Message);
+                MessageBox.Show("è¨­å®šãƒ•ã‚¡ã‚¤ãƒ«ã®èª­ã¿è¾¼ã¿ã«å¤±æ•—ã—ã¾ã—ãŸ: " + ex.Message);
             }
         }
         private void SaveBackupTasks()
@@ -190,7 +194,7 @@ namespace FilesBackup
             {
                 var tasks = new List<BackupTask>();
 
-                // ¥ flowPanel.Controls.Cast<Control>().Reverse() ‚ğg‚Á‚Ä‡˜‚ğ‹t‚É
+                // â–¼ flowPanel.Controls.Cast<Control>().Reverse() ã‚’ä½¿ã£ã¦é †åºã‚’é€†ã«
                 foreach (Control ctrl in flowPanel.Controls.Cast<Control>().Reverse())
                 {
                     if (ctrl is BackupTaskControl taskControl)
@@ -213,39 +217,76 @@ namespace FilesBackup
                     }
                 }
 
+                // ã‚³ãƒ”ãƒ¼å…ˆãŒã‚³ãƒ”ãƒ¼å…ƒã®é…ä¸‹ã«ãªã£ã¦ã„ã‚‹è¨­å®šã¯ä¿å­˜ã•ã›ãªã„ï¼ˆç„¡é™ã‚³ãƒ”ãƒ¼é˜²æ­¢ï¼‰
+                var selfCopyErrors = BackupManager.FindSelfCopyErrors(tasks);
+                if (selfCopyErrors.Count > 0)
+                {
+                    MessageBox.Show(
+                        "æ¬¡ã®è¨­å®šã¯ã‚³ãƒ”ãƒ¼å…ˆãŒã‚³ãƒ”ãƒ¼å…ƒã®é…ä¸‹ã®ãŸã‚ä¿å­˜ã§ãã¾ã›ã‚“ã€‚\n\n" + string.Join("\n", selfCopyErrors),
+                        "ä¿å­˜ã§ãã¾ã›ã‚“", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
                 Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
                 File.WriteAllText(configPath, JsonSerializer.Serialize(tasks, new JsonSerializerOptions { WriteIndented = true }));
-                MessageBox.Show("İ’è‚ğ•Û‘¶‚µ‚Ü‚µ‚½B", "Š®—¹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("è¨­å®šã‚’ä¿å­˜ã—ã¾ã—ãŸã€‚", "å®Œäº†", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("İ’è‚Ì•Û‘¶‚É¸”s‚µ‚Ü‚µ‚½: " + ex.Message);
+                MessageBox.Show("è¨­å®šã®ä¿å­˜ã«å¤±æ•—ã—ã¾ã—ãŸ: " + ex.Message);
             }
         }
 
-        private void btnStartBackup_Click(object sender, EventArgs e)
+        private async void btnStartBackup_Click(object sender, EventArgs e)
         {
+            if (_backupCts != null) return;   // å®Ÿè¡Œä¸­ã®äºŒé‡èµ·å‹•ã¯ç„¡è¦–
+
             try
             {
-                var manager = new BackupManager();      // š éŒ¾‚Í‚±‚ê1‰ñ‚¾‚¯
+                var manager = new BackupManager();
                 manager.LoadFromJson(configPath);
 
-                // š Šg’£qœŠO‚ğ³‚µ‚­Œø‚©‚¹‚éiŒÂ•ÊƒfƒVƒŠƒAƒ‰ƒCƒY‚Å‚Í‚È‚­ê—pƒ[ƒ_[‚ğg‚¤j
+                // æ‹¡å¼µå­é™¤å¤–ã‚’æ­£ã—ãåŠ¹ã‹ã›ã‚‹ï¼ˆå€‹åˆ¥ãƒ‡ã‚·ãƒªã‚¢ãƒ©ã‚¤ã‚ºã§ã¯ãªãå°‚ç”¨ãƒ­ãƒ¼ãƒ€ãƒ¼ã‚’ä½¿ã†ï¼‰
                 manager.LoadIgnoreList(ignorePath);
 
-                int changedCount = manager.ExecuteAll();
+                var selfCopyErrors = BackupManager.FindSelfCopyErrors(manager.Tasks);
+                if (selfCopyErrors.Count > 0)
+                {
+                    MessageBox.Show(
+                        "æ¬¡ã®è¨­å®šã¯ã‚³ãƒ”ãƒ¼å…ˆãŒã‚³ãƒ”ãƒ¼å…ƒã®é…ä¸‹ã®ãŸã‚å®Ÿè¡Œã§ãã¾ã›ã‚“ã€‚è¨­å®šã‚’ä¿®æ­£ã—ã¦ãã ã•ã„ã€‚\n\n" + string.Join("\n", selfCopyErrors),
+                        "å®Ÿè¡Œã§ãã¾ã›ã‚“", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // é‡ã„å‡¦ç†ã¯åˆ¥ã‚¹ãƒ¬ãƒƒãƒ‰ã§å®Ÿè¡Œã—ã€UIï¼ˆãƒœã‚¿ãƒ³ãƒ»ã‚¿ãƒ–ãƒ»ãƒˆãƒ¬ã‚¤ï¼‰ã¯å¿œç­”ã‚’ä¿ã¤
+                _backupCts = new CancellationTokenSource();
+                btnStartBackup.Enabled = false;
+                var token = _backupCts.Token;
+
+                int changedCount = await System.Threading.Tasks.Task.Run(() => manager.ExecuteAll(token));
+
                 trayIcon.ShowBalloonTip(
-                    5000, "ƒoƒbƒNƒAƒbƒvŠ®—¹",
-                    $"•ÏX‚³‚ê‚½ƒtƒ@ƒCƒ‹”F{changedCount} Œ",
+                    5000, "ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—å®Œäº†",
+                    $"å¤‰æ›´ã•ã‚ŒãŸãƒ•ã‚¡ã‚¤ãƒ«æ•°ï¼š{changedCount} ä»¶",
                     ToolTipIcon.Info
                 );
+            }
+            catch (OperationCanceledException)
+            {
+                trayIcon.ShowBalloonTip(5000, "ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—ä¸­æ­¢", "ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—ã‚’ä¸­æ­¢ã—ã¾ã—ãŸã€‚", ToolTipIcon.Warning);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"ƒoƒbƒNƒAƒbƒv’†‚ÉƒGƒ‰[‚ª”­¶‚µ‚Ü‚µ‚½: {ex.Message}",
-                    "ƒGƒ‰[", MessageBoxButtons.OK, MessageBoxIcon.Error
+                    $"ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—ä¸­ã«ã‚¨ãƒ©ãƒ¼ãŒç™ºç”Ÿã—ã¾ã—ãŸ: {ex.Message}",
+                    "ã‚¨ãƒ©ãƒ¼", MessageBoxButtons.OK, MessageBoxIcon.Error
                 );
+            }
+            finally
+            {
+                _backupCts?.Dispose();
+                _backupCts = null;
+                btnStartBackup.Enabled = true;
             }
         }
 
@@ -278,10 +319,10 @@ namespace FilesBackup
                 taskControl.SetTask(new BackupTask { Source = source, Destination = destination }, silent: true);
             }
 
-            // š ‚±‚±‚ÅƒCƒxƒ“ƒgw“Ç
+            // â˜… ã“ã“ã§ã‚¤ãƒ™ãƒ³ãƒˆè³¼èª­
             taskControl.OnChanged += (s, ev) => MarkTaskModified();
 
-            // ãˆÚ“®ƒCƒxƒ“ƒg
+            // ä¸Šç§»å‹•ã‚¤ãƒ™ãƒ³ãƒˆ
             taskControl.OnMoveUpRequested += (s, ev) =>
             {
                 int index = flowPanel.Controls.GetChildIndex(taskControl);
@@ -290,11 +331,11 @@ namespace FilesBackup
                 {
                     flowPanel.Controls.SetChildIndex(taskControl, index - 1);
                     flowPanel.Invalidate();
-                    MarkTaskModified(); // š ’Ç‰Á
+                    MarkTaskModified(); // â˜… è¿½åŠ 
                 }
             };
 
-            // ‰ºˆÚ“®ƒCƒxƒ“ƒg
+            // ä¸‹ç§»å‹•ã‚¤ãƒ™ãƒ³ãƒˆ
             taskControl.OnMoveDownRequested += (s, ev) =>
             {
                 int index = flowPanel.Controls.GetChildIndex(taskControl);
@@ -302,15 +343,15 @@ namespace FilesBackup
                 {
                     flowPanel.Controls.SetChildIndex(taskControl, index + 1);
                     flowPanel.Invalidate();
-                    MarkTaskModified(); // š ’Ç‰Á
+                    MarkTaskModified(); // â˜… è¿½åŠ 
                 }
             };
 
-            // íœƒCƒxƒ“ƒg
+            // å‰Šé™¤ã‚¤ãƒ™ãƒ³ãƒˆ
             taskControl.OnRemoveRequested += (s, ev) =>
             {
                 flowPanel.Controls.Remove(taskControl);
-                MarkTaskModified(); // š ’Ç‰Á
+                MarkTaskModified(); // â˜… è¿½åŠ 
             };
 
 
@@ -318,7 +359,7 @@ namespace FilesBackup
             if (taskHeader != null && !taskHeader.IsDisposed)
                 {
                 int headerIndex = flowPanel.Controls.IndexOf(taskHeader);
-                flowPanel.Controls.SetChildIndex(taskControl, headerIndex + 1); // ƒwƒbƒ_[’¼‰º
+                flowPanel.Controls.SetChildIndex(taskControl, headerIndex + 1); // ãƒ˜ãƒƒãƒ€ãƒ¼ç›´ä¸‹
                 }
              else
                 {
@@ -330,14 +371,14 @@ namespace FilesBackup
         {
             if (taskHeader != null && !taskHeader.IsDisposed) return;
 
-            // BackupTaskControl ‚ÌƒŒƒCƒAƒEƒg‚Æ‘µ‚¦‚éiª:30 +2 / «:30 +10 = 72pxj
-            // txtSource.Left = 72, txtDestination.Left = 332 ‚ª¡‚Ì”z’u
+            // BackupTaskControl ã®ãƒ¬ã‚¤ã‚¢ã‚¦ãƒˆã¨æƒãˆã‚‹ï¼ˆâ†‘:30 +2 / â†“:30 +10 = 72pxï¼‰
+            // txtSource.Left = 72, txtDestination.Left = 332 ãŒä»Šã®é…ç½®
             const int srcLeft = 72;
             const int dstLeft = 332;
 
             taskHeader = new Panel
             {
-                Width = 820,   // BackupTaskControl ‚Æ“¯‚¶•
+                Width = 820,   // BackupTaskControl ã¨åŒã˜å¹…
                 Height = 20,
                 Margin = new Padding(0, 0, 0, 4),
                 BackColor = Color.Transparent
@@ -346,14 +387,14 @@ namespace FilesBackup
             var lblSrc = new Label
             {
                 AutoSize = true,
-                Text = "ƒRƒs[Œ³",
+                Text = "ã‚³ãƒ”ãƒ¼å…ƒ",
                 Font = new Font(Font, FontStyle.Bold),
                 Location = new Point(srcLeft, 0)
             };
             var lblDst = new Label
             {
                 AutoSize = true,
-                Text = "ƒRƒs[æ",
+                Text = "ã‚³ãƒ”ãƒ¼å…ˆ",
                 Font = new Font(Font, FontStyle.Bold),
                 Location = new Point(dstLeft, 0)
             };
@@ -361,7 +402,7 @@ namespace FilesBackup
             taskHeader.Controls.Add(lblSrc);
             taskHeader.Controls.Add(lblDst);
 
-            // ’Ç‰Á‚µ‚Äˆê”Ôãiindex=0j‚ÉŒÅ’è
+            // è¿½åŠ ã—ã¦ä¸€ç•ªä¸Šï¼ˆindex=0ï¼‰ã«å›ºå®š
             flowPanel.Controls.Add(taskHeader);
             flowPanel.Controls.SetChildIndex(taskHeader, 0);
         }
@@ -378,22 +419,22 @@ namespace FilesBackup
         {
             try
             {
-                _suppressUiMark = true;                // © ’Ç‰Áiƒ[ƒh’†‚Í“_“”‹Ö~j
+                _suppressUiMark = true;                // â† è¿½åŠ ï¼ˆãƒ­ãƒ¼ãƒ‰ä¸­ã¯ç‚¹ç¯ç¦æ­¢ï¼‰
                 if (File.Exists(schedulePath))
                 {
                     var json = File.ReadAllText(schedulePath);
                     var saved = JsonSerializer.Deserialize<ScheduleConfig>(json);
                     if (saved != null)
                     {
-                        dtpScheduleTime.Value = DateTime.Today.Add(saved.Time); // 
-                        cmbFrequency.SelectedItem = saved.Frequency;            // •p“x
+                        dtpScheduleTime.Value = DateTime.Today.Add(saved.Time); // æ™‚åˆ»
+                        cmbFrequency.SelectedItem = saved.Frequency;            // é »åº¦
 
-                        if (saved.Frequency == "–ˆT" && saved.DaysOfWeek != null)
+                        if (saved.Frequency == "æ¯é€±" && saved.DaysOfWeek != null)
                         {
                             for (int i = 0; i < clbWeekDays.Items.Count; i++)
                             {
                                 string dayStr = clbWeekDays.Items[i].ToString()!;
-                                DayOfWeek day = (DayOfWeek)"“úŒ‰Î…–Ø‹à“y".IndexOf(dayStr);
+                                DayOfWeek day = (DayOfWeek)"æ—¥æœˆç«æ°´æœ¨é‡‘åœŸ".IndexOf(dayStr);
                                 clbWeekDays.SetItemChecked(i, saved.DaysOfWeek.Contains(day));
                             }
                         }
@@ -407,11 +448,11 @@ namespace FilesBackup
             }
             catch (Exception ex)
             {
-                MessageBox.Show("ƒXƒPƒWƒ…[ƒ‹“Ç‚İ‚İƒGƒ‰[: " + ex.Message);
+                MessageBox.Show("ã‚¹ã‚±ã‚¸ãƒ¥ãƒ¼ãƒ«èª­ã¿è¾¼ã¿ã‚¨ãƒ©ãƒ¼: " + ex.Message);
             }
             finally
             {
-                _suppressUiMark = false;               // © ‰ğœ
+                _suppressUiMark = false;               // â† è§£é™¤
             }
         }
 
@@ -419,17 +460,17 @@ namespace FilesBackup
         {
             try
             {
-                _suppressUiMark = true; // © •Û‘¶’†‚Í“_“”‹Ö~
+                _suppressUiMark = true; // â† ä¿å­˜ä¸­ã¯ç‚¹ç¯ç¦æ­¢
 
-                string frequency = cmbFrequency.SelectedItem?.ToString() ?? "–ˆ“ú";
+                string frequency = cmbFrequency.SelectedItem?.ToString() ?? "æ¯æ—¥";
                 TimeSpan time = dtpScheduleTime.Value.TimeOfDay;
 
                 List<DayOfWeek>? daysOfWeek = null;
-                if (frequency == "–ˆT")
+                if (frequency == "æ¯é€±")
                 {
                     daysOfWeek = clbWeekDays.CheckedItems
                         .Cast<string>()
-                        .Select(d => "“úŒ‰Î…–Ø‹à“y".Select((c, i) => new { Char = c.ToString(), Day = (DayOfWeek)i })
+                        .Select(d => "æ—¥æœˆç«æ°´æœ¨é‡‘åœŸ".Select((c, i) => new { Char = c.ToString(), Day = (DayOfWeek)i })
                         .First(pair => d.StartsWith(pair.Char)).Day)
                         .ToList();
                 }
@@ -446,17 +487,17 @@ namespace FilesBackup
 
                 RegisterTaskScheduler(frequency, time, daysOfWeek);
 
-                MessageBox.Show("ƒXƒPƒWƒ…[ƒ‹‚ğ•Û‘¶‚µAƒ^ƒXƒN‚É“o˜^‚µ‚Ü‚µ‚½B", "Š®—¹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("ã‚¹ã‚±ã‚¸ãƒ¥ãƒ¼ãƒ«ã‚’ä¿å­˜ã—ã€ã‚¿ã‚¹ã‚¯ã«ç™»éŒ²ã—ã¾ã—ãŸã€‚", "å®Œäº†", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("ƒXƒPƒWƒ…[ƒ‹•Û‘¶¸”s: " + ex.Message, "ƒGƒ‰[", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("ã‚¹ã‚±ã‚¸ãƒ¥ãƒ¼ãƒ«ä¿å­˜å¤±æ•—: " + ex.Message, "ã‚¨ãƒ©ãƒ¼", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
                 scheduleModified = false;
-                _suppressUiMark = false;                 // © ‰ğœ
-                ResetButtonStyle(btnSaveSchedule);       // © ³‚µ‚­Á“”
+                _suppressUiMark = false;                 // â† è§£é™¤
+                ResetButtonStyle(btnSaveSchedule);       // â† æ­£ã—ãæ¶ˆç¯
             }
         }
 
@@ -468,46 +509,46 @@ namespace FilesBackup
 
             using (TaskService ts = new TaskService())
             {
-                // ŒÃ‚¢ƒ^ƒXƒN‚ğíœi‚ ‚ê‚Îj
+                // å¤ã„ã‚¿ã‚¹ã‚¯ã‚’å‰Šé™¤ï¼ˆã‚ã‚Œã°ï¼‰
                 var oldTask = ts.FindTask(taskName);
                 if (oldTask != null)
                     ts.RootFolder.DeleteTask(taskName);
 
                 TaskDefinition td = ts.NewTask();
-                td.RegistrationInfo.Description = "©“®ƒoƒbƒNƒAƒbƒvƒ^ƒXƒN";
+                td.RegistrationInfo.Description = "è‡ªå‹•ãƒãƒƒã‚¯ã‚¢ãƒƒãƒ—ã‚¿ã‚¹ã‚¯";
 
-                // š‚±‚±‚ªƒ|ƒCƒ“ƒgFuƒXƒPƒWƒ…[ƒ‹‚ğ“¦‚µ‚½‚ç‚·‚®‚ÉÀsvƒIƒvƒVƒ‡ƒ“
+                // â˜…ã“ã“ãŒãƒã‚¤ãƒ³ãƒˆï¼šã€Œã‚¹ã‚±ã‚¸ãƒ¥ãƒ¼ãƒ«ã‚’é€ƒã—ãŸã‚‰ã™ãã«å®Ÿè¡Œã€ã‚ªãƒ—ã‚·ãƒ§ãƒ³
                 td.Settings.StartWhenAvailable = true;
                 td.Settings.MultipleInstances = TaskInstancesPolicy.IgnoreNew;
-                td.Principal.RunLevel = TaskRunLevel.Highest; // ŠÇ—ÒÀs
+                td.Principal.RunLevel = TaskRunLevel.Highest; // ç®¡ç†è€…å®Ÿè¡Œ
 
-                // ƒgƒŠƒK[İ’è
-                if (frequency == "–ˆ“ú")
+                // ãƒˆãƒªã‚¬ãƒ¼è¨­å®š
+                if (frequency == "æ¯æ—¥")
                 {
                     var trigger = new DailyTrigger { DaysInterval = 1, StartBoundary = DateTime.Today + time };
                     td.Triggers.Add(trigger);
                 }
-                else if (frequency == "–ˆT" && daysOfWeek != null)
+                else if (frequency == "æ¯é€±" && daysOfWeek != null)
                 {
                     var trigger = new WeeklyTrigger { StartBoundary = DateTime.Today + time };
                     foreach (var day in daysOfWeek)
                         trigger.DaysOfWeek |= (DaysOfTheWeek)(1 << (int)day);
                     td.Triggers.Add(trigger);
                 }
-                else if (frequency == "‹N“®")
+                else if (frequency == "èµ·å‹•æ™‚")
                 {
                     td.Triggers.Add(new BootTrigger());
                 }
                 else
                 {
-                    MessageBox.Show("ƒXƒPƒWƒ…[ƒ‹İ’è‚ª•s³‚Å‚·B", "ƒGƒ‰[", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("ã‚¹ã‚±ã‚¸ãƒ¥ãƒ¼ãƒ«è¨­å®šãŒä¸æ­£ã§ã™ã€‚", "ã‚¨ãƒ©ãƒ¼", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
-                // ÀsƒAƒNƒVƒ‡ƒ“İ’è
+                // å®Ÿè¡Œã‚¢ã‚¯ã‚·ãƒ§ãƒ³è¨­å®š
                 td.Actions.Add(new ExecAction(exePath, "auto", null));
 
-                // “o˜^
+                // ç™»éŒ²
                 ts.RootFolder.RegisterTaskDefinition(taskName, td);
             }
         }
@@ -516,7 +557,7 @@ namespace FilesBackup
         {
             try
             {
-                _suppressUiMark = true;                // © ’Ç‰Áiƒ[ƒh’†‚Í“_“”‹Ö~j
+                _suppressUiMark = true;                // â† è¿½åŠ ï¼ˆãƒ­ãƒ¼ãƒ‰ä¸­ã¯ç‚¹ç¯ç¦æ­¢ï¼‰
                 if (File.Exists(ignorePath))
                 {
                     var config = JsonSerializer.Deserialize<IgnoreConfig>(File.ReadAllText(ignorePath));
@@ -524,15 +565,15 @@ namespace FilesBackup
                     if (config?.Paths != null)
                         lstIgnoreItems.Items.AddRange(config.Paths.ToArray());
                 }
-                lstIgnoreItems.SelectedIndex = -1;     // © –³‘I‘ğ‚É
+                lstIgnoreItems.SelectedIndex = -1;     // â† ç„¡é¸æŠã«
             }
             catch (Exception ex)
             {
-                MessageBox.Show("œŠOİ’è‚Ì“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½: " + ex.Message);
+                MessageBox.Show("é™¤å¤–è¨­å®šã®èª­ã¿è¾¼ã¿ã«å¤±æ•—ã—ã¾ã—ãŸ: " + ex.Message);
             }
             finally
             {
-                _suppressUiMark = false;               // © ‰ğœ
+                _suppressUiMark = false;               // â† è§£é™¤
             }
         }
 
@@ -554,7 +595,7 @@ namespace FilesBackup
         {
             try
             {
-                _suppressUiMark = true; // © •Û‘¶’†‚Í“_“”‹Ö~
+                _suppressUiMark = true; // â† ä¿å­˜ä¸­ã¯ç‚¹ç¯ç¦æ­¢
 
                 var list = new List<string>();
                 foreach (var item in lstIgnoreItems.Items)
@@ -564,22 +605,22 @@ namespace FilesBackup
                 Directory.CreateDirectory(Path.GetDirectoryName(ignorePath)!);
                 File.WriteAllText(ignorePath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
 
-                MessageBox.Show("œŠOİ’è‚ğ•Û‘¶‚µ‚Ü‚µ‚½B", "Š®—¹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("é™¤å¤–è¨­å®šã‚’ä¿å­˜ã—ã¾ã—ãŸã€‚", "å®Œäº†", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("œŠOİ’è‚Ì•Û‘¶‚É¸”s‚µ‚Ü‚µ‚½: " + ex.Message, "ƒGƒ‰[", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("é™¤å¤–è¨­å®šã®ä¿å­˜ã«å¤±æ•—ã—ã¾ã—ãŸ: " + ex.Message, "ã‚¨ãƒ©ãƒ¼", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
                 ignoreModified = false;
-                _suppressUiMark = false;            // © ‰ğœ
-                ResetButtonStyle(btnSaveIgnore);    // © ³‚µ‚­Á“”
+                _suppressUiMark = false;            // â† è§£é™¤
+                ResetButtonStyle(btnSaveIgnore);    // â† æ­£ã—ãæ¶ˆç¯
             }
         }
         private class ScheduleConfig
         {
-            public string Frequency { get; set; } = "–ˆ“ú";
+            public string Frequency { get; set; } = "æ¯æ—¥";
             public TimeSpan Time { get; set; }
             public List<DayOfWeek>? DaysOfWeek { get; set; }
         }
@@ -594,7 +635,7 @@ namespace FilesBackup
 
             if (string.IsNullOrEmpty(ext))
             {
-                MessageBox.Show("Šg’£q‚ğ“ü—Í‚µ‚Ä‚­‚¾‚³‚¢i—áF.tmpj", "“ü—ÍƒGƒ‰[", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("æ‹¡å¼µå­ã‚’å…¥åŠ›ã—ã¦ãã ã•ã„ï¼ˆä¾‹ï¼š.tmpï¼‰", "å…¥åŠ›ã‚¨ãƒ©ãƒ¼", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -610,7 +651,7 @@ namespace FilesBackup
             }
             else
             {
-                MessageBox.Show("‚·‚Å‚ÉƒŠƒXƒg‚É’Ç‰Á‚³‚ê‚Ä‚¢‚Ü‚·B", "d•¡", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("ã™ã§ã«ãƒªã‚¹ãƒˆã«è¿½åŠ ã•ã‚Œã¦ã„ã¾ã™ã€‚", "é‡è¤‡", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
         private void btnRemoveIgnoreItem_Click(object sender, EventArgs e)
@@ -619,11 +660,11 @@ namespace FilesBackup
             if (selected != null)
             {
                 lstIgnoreItems.Items.Remove(selected);
-                MarkIgnoreModified(); // ”O‚Ì‚½‚ß‚±‚±‚Å‚à•ÏXŒŸ’m
+                MarkIgnoreModified(); // å¿µã®ãŸã‚ã“ã“ã§ã‚‚å¤‰æ›´æ¤œçŸ¥
             }
             else
             {
-                MessageBox.Show("íœ‚·‚é€–Ú‚ğ‘I‘ğ‚µ‚Ä‚­‚¾‚³‚¢B", "î•ñ", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("å‰Šé™¤ã™ã‚‹é …ç›®ã‚’é¸æŠã—ã¦ãã ã•ã„ã€‚", "æƒ…å ±", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
     }
