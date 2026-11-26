@@ -1,18 +1,27 @@
-﻿using System.Text;
+﻿using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using FilesBackup.Models;
 
 namespace FilesBackup.Services
 {
+    // 進捗通知（現在のタスク内の処理済み件数・総件数・直近のファイル）
+    public record BackupProgress(int Done, int Total, string Current);
+
     public class BackupManager
     {
         private static readonly string LogDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FilesBackup", "logs");
+        private static readonly object LogLock = new();
 
-        private const int MaxCopyAttempts = 3;                                  // IOエラー時の試行回数
-        private const int LogRetentionDays = 30;                                // ログの保持日数
-        private static readonly TimeSpan TimestampTolerance = TimeSpan.FromSeconds(2); // NAS/FAT の時刻精度差を吸収
+        private const int MaxCopyAttempts = 3;                                          // IOエラー時の試行回数
+        private const int LogRetentionDays = 30;                                        // ログの保持日数
+        private const int ProgressReportInterval = 20;                                  // 進捗通知の間引き（件数）
+        private static readonly TimeSpan TimestampTolerance = TimeSpan.FromSeconds(2);  // NAS/FAT の時刻精度差を吸収
+
+        // 一時停止の制御。Set のときは実行、Reset のときは待機
+        private readonly ManualResetEventSlim _running = new(true);
 
         public List<BackupTask> Tasks { get; private set; } = new();
 
@@ -25,6 +34,22 @@ namespace FilesBackup.Services
 
         // ジャンクション/シンボリックリンク（再解析ポイント）を辿るか。既定は辿らない。
         public bool FollowReparsePoints { get; set; } = false;
+
+        // 時刻が新しくても内容が同じならコピーしない（ハッシュで確認）
+        public bool CompareByHash { get; set; } = false;
+
+        // 並列コピー数（HDD は 1、SSD や NAS は 2〜4 程度が目安）
+        private int _maxDegreeOfParallelism = 2;
+        public int MaxDegreeOfParallelism
+        {
+            get => _maxDegreeOfParallelism;
+            set => _maxDegreeOfParallelism = Math.Clamp(value, 1, 8);
+        }
+
+        public bool IsPaused => !_running.IsSet;
+
+        public void Pause() => _running.Reset();
+        public void Resume() => _running.Set();
 
         public void LoadFromJson(string jsonPath)
         {
@@ -39,6 +64,8 @@ namespace FilesBackup.Services
         {
             public List<string> Paths { get; set; } = new();
             public bool SkipHiddenAndSystem { get; set; } = false;
+            public bool CompareByHash { get; set; } = false;
+            public int MaxDegreeOfParallelism { get; set; } = 2;
         }
 
         public void LoadIgnoreList(string ignorePath)
@@ -53,6 +80,8 @@ namespace FilesBackup.Services
                 if (config != null)
                 {
                     SkipHiddenAndSystem = config.SkipHiddenAndSystem;
+                    CompareByHash = config.CompareByHash;
+                    MaxDegreeOfParallelism = config.MaxDegreeOfParallelism;
                     entries = config.Paths.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
                 }
             }
@@ -129,8 +158,8 @@ namespace FilesBackup.Services
             return errors;
         }
 
-        // ドライラン：実際にはコピーせず、コピーされる予定の件数だけ数える
-        public int ExecuteAll(CancellationToken cancellationToken = default, bool dryRun = false)
+        // dryRun: コピーせず、コピーされる予定の件数だけ数える
+        public int ExecuteAll(CancellationToken cancellationToken = default, bool dryRun = false, IProgress<BackupProgress>? progress = null)
         {
             CleanOldLogs();
 
@@ -164,7 +193,7 @@ namespace FilesBackup.Services
                         continue;
                     }
 
-                    int copied = Copy(task.Source, task.Destination, ignores, cancellationToken, dryRun);
+                    int copied = CopyTask(task.Source, task.Destination, ignores, cancellationToken, dryRun, progress);
                     totalCopied += copied;
                     Log($"{tag}[{task.Source} → {task.Destination}] {copied} 個{(dryRun ? "コピー予定" : "コピーしました")}");
                 }
@@ -181,61 +210,98 @@ namespace FilesBackup.Services
             return totalCopied;
         }
 
-        private int Copy(string src, string dst, IReadOnlyList<string> ignores, CancellationToken cancellationToken, bool dryRun)
+        private int CopyTask(string src, string dst, IReadOnlyList<string> ignores, CancellationToken ct, bool dryRun, IProgress<BackupProgress>? progress)
         {
-            int count = 0;
+            // 先に対象ファイルを列挙してから並列コピーする（進捗の総件数を出すため）
+            var files = EnumerateFilesSafe(src, ignores)
+                .Where(file => !IgnoreExtensions.Contains(Path.GetExtension(file).ToLowerInvariant()))
+                .Where(file => !IsExcluded(file, ignores))
+                .ToList();
 
-            foreach (var file in EnumerateFilesSafe(src, ignores))
+            int copied = 0;
+            int done = 0;
+            int total = files.Count;
+
+            var options = new ParallelOptions
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                MaxDegreeOfParallelism = MaxDegreeOfParallelism,
+                CancellationToken = ct
+            };
 
-                string relative = Path.GetRelativePath(src, file);
-                string extension = Path.GetExtension(file).ToLowerInvariant();
-
-                if (IgnoreExtensions.Contains(extension))
-                    continue;
-
-                if (IsExcluded(file, ignores))
-                    continue;
-
-                string destPath = Path.Combine(dst, relative);
-
-                try
+            try
+            {
+                Parallel.ForEach(files, options, file =>
                 {
-                    if (!NeedsCopy(file, destPath))
-                        continue;
+                    _running.Wait(ct);              // 一時停止中はここで待つ
+                    ct.ThrowIfCancellationRequested();
 
-                    if (!dryRun)
+                    string destPath = Path.Combine(dst, Path.GetRelativePath(src, file));
+
+                    try
                     {
-                        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-                        CopyWithRetry(file, destPath);
+                        if (NeedsCopy(file, destPath))
+                        {
+                            if (!dryRun)
+                            {
+                                Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                                CopyWithRetry(file, destPath);
+                            }
+                            Interlocked.Increment(ref copied);
+                        }
                     }
-                    count++;
-                }
-                catch (UnauthorizedAccessException ex)
-                {
-                    Log($"[SKIP] アクセス拒否: {file} - {ex.Message}");
-                }
-                catch (IOException ex)
-                {
-                    Log($"[SKIP] IOエラー: {file} - {ex.Message}");
-                }
-                catch (Exception ex)
-                {
-                    Log($"[SKIP] 予期せぬエラー: {file} - {ex.Message}");
-                }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        Log($"[SKIP] アクセス拒否: {file} - {ex.Message}");
+                    }
+                    catch (IOException ex)
+                    {
+                        Log($"[SKIP] IOエラー: {file} - {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"[SKIP] 予期せぬエラー: {file} - {ex.Message}");
+                    }
+
+                    int d = Interlocked.Increment(ref done);
+                    if (progress != null && (d % ProgressReportInterval == 0 || d == total))
+                        progress.Report(new BackupProgress(d, total, file));
+                });
+            }
+            catch (AggregateException ae) when (ae.InnerExceptions.All(e => e is OperationCanceledException))
+            {
+                throw new OperationCanceledException(ct);
             }
 
-            return count;
+            return copied;
         }
 
-        // コピーが必要か：コピー先が無い、またはコピー元が許容誤差より新しい場合
-        private static bool NeedsCopy(string src, string dst)
+        // コピーが必要か：コピー先が無い、またはコピー元が許容誤差より新しい（かつ内容が違う）場合
+        private bool NeedsCopy(string src, string dst)
         {
             if (!File.Exists(dst))
                 return true;
 
-            return File.GetLastWriteTimeUtc(src) - File.GetLastWriteTimeUtc(dst) > TimestampTolerance;
+            var srcInfo = new FileInfo(src);
+            var dstInfo = new FileInfo(dst);
+
+            if (srcInfo.LastWriteTimeUtc - dstInfo.LastWriteTimeUtc <= TimestampTolerance)
+                return false;
+
+            if (!CompareByHash)
+                return true;
+
+            // 時刻だけ新しく内容が同じなら、コピーを省く
+            if (srcInfo.Length != dstInfo.Length)
+                return true;
+
+            return !HashEquals(src, dst);
+        }
+
+        private static bool HashEquals(string a, string b)
+        {
+            using var fa = File.OpenRead(a);
+            using var fb = File.OpenRead(b);
+            return SHA256.HashData(fa).AsSpan().SequenceEqual(SHA256.HashData(fb));
         }
 
         // 一時的なIOエラー（ファイルのロード中など）は少し待って再試行する
@@ -449,19 +515,22 @@ namespace FilesBackup.Services
             }
         }
 
-        // コンソール（自動実行時は見えない）と日付別ログファイルの両方へ出力
+        // コンソール（自動実行時は見えない）と日付別ログファイルの両方へ出力（並列実行中も混ざらないよう排他）
         private static void Log(string message)
         {
             string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}";
-            Console.WriteLine(line);
-            try
+            lock (LogLock)
             {
-                Directory.CreateDirectory(LogDir);
-                File.AppendAllText(Path.Combine(LogDir, $"{DateTime.Now:yyyyMMdd}.log"), line + Environment.NewLine);
-            }
-            catch
-            {
-                // ログ書き込み失敗でバックアップ自体を止めない
+                Console.WriteLine(line);
+                try
+                {
+                    Directory.CreateDirectory(LogDir);
+                    File.AppendAllText(Path.Combine(LogDir, $"{DateTime.Now:yyyyMMdd}.log"), line + Environment.NewLine);
+                }
+                catch
+                {
+                    // ログ書き込み失敗でバックアップ自体を止めない
+                }
             }
         }
     }

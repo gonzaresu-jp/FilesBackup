@@ -39,6 +39,9 @@ namespace FilesBackup
         // 実行中のバックアップのキャンセル用（null なら未実行）
         private CancellationTokenSource? _backupCts;
 
+        // 実行中の BackupManager（一時停止・再開に使う）
+        private BackupManager? _currentManager;
+
 
 
         public Form1()
@@ -67,6 +70,10 @@ namespace FilesBackup
             clbWeekDays.ItemCheck += (s, e) => MarkScheduleModified();
             chkHighest.CheckedChanged += (s, e) => MarkScheduleModified();
             chkSkipHiddenSystem.CheckedChanged += (s, e) => MarkIgnoreModified();
+            chkCompareHash.CheckedChanged += (s, e) => MarkIgnoreModified();
+            nudParallel.ValueChanged += (s, e) => MarkIgnoreModified();
+            chkAcOnly.CheckedChanged += (s, e) => MarkScheduleModified();
+            chkWake.CheckedChanged += (s, e) => MarkScheduleModified();
 
             lstIgnoreItems.SelectedIndexChanged += (s, e) => MarkIgnoreModified();
             btnAddIgnoreFile.Click += (s, e) => MarkIgnoreModified();
@@ -260,12 +267,24 @@ namespace FilesBackup
                     return;
                 }
 
+                ApplyOptions(manager);
+
                 // 重い処理は別スレッドで実行し、UI（ボタン・タブ・トレイ）は応答を保つ
                 _backupCts = new CancellationTokenSource();
-                btnStartBackup.Enabled = false;
+                _currentManager = manager;
                 var token = _backupCts.Token;
+                var progress = new Progress<BackupProgress>(p =>
+                {
+                    prgBackup.Maximum = Math.Max(1, p.Total);
+                    prgBackup.Value = Math.Min(p.Done, prgBackup.Maximum);
+                    lblStatus.Text = $"{p.Done} / {p.Total}  {p.Current}";
+                });
 
-                int changedCount = await System.Threading.Tasks.Task.Run(() => manager.ExecuteAll(token));
+                btnStartBackup.Enabled = false;
+                btnPreview.Enabled = false;
+                btnPause.Enabled = true;
+
+                int changedCount = await System.Threading.Tasks.Task.Run(() => manager.ExecuteAll(token, false, progress));
 
                 trayIcon.ShowBalloonTip(
                     5000, "バックアップ完了",
@@ -288,7 +307,37 @@ namespace FilesBackup
             {
                 _backupCts?.Dispose();
                 _backupCts = null;
+                _currentManager = null;
                 btnStartBackup.Enabled = true;
+                btnPreview.Enabled = true;
+                btnPause.Enabled = false;
+                btnPause.Text = "一時停止";
+                prgBackup.Value = 0;
+                lblStatus.Text = "";
+            }
+        }
+
+        // 画面の設定（並列数・ハッシュ比較）を実行エンジンに反映する
+        private void ApplyOptions(BackupManager manager)
+        {
+            manager.MaxDegreeOfParallelism = (int)nudParallel.Value;
+            manager.CompareByHash = chkCompareHash.Checked;
+        }
+
+        // 一時停止・再開。実行中のファイルは完了させ、次のファイルから止める
+        private void btnPause_Click(object sender, EventArgs e)
+        {
+            if (_currentManager == null) return;
+
+            if (_currentManager.IsPaused)
+            {
+                _currentManager.Resume();
+                btnPause.Text = "一時停止";
+            }
+            else
+            {
+                _currentManager.Pause();
+                btnPause.Text = "再開";
             }
         }
 
@@ -302,6 +351,8 @@ namespace FilesBackup
                 var manager = new BackupManager();
                 manager.LoadFromJson(configPath);
                 manager.LoadIgnoreList(ignorePath);
+
+                ApplyOptions(manager);
 
                 int count = await System.Threading.Tasks.Task.Run(
                     () => manager.ExecuteAll(CancellationToken.None, dryRun: true));
@@ -455,6 +506,8 @@ namespace FilesBackup
                         dtpScheduleTime.Value = DateTime.Today.Add(saved.Time); // 時刻
                         cmbFrequency.SelectedItem = saved.Frequency;            // 頻度
                         chkHighest.Checked = saved.RunWithHighestPrivileges;    // 最高特権
+                        chkAcOnly.Checked = saved.AcPowerOnly;                  // 電源条件
+                        chkWake.Checked = saved.WakeToRun;
 
                         if (saved.Frequency == "毎週" && saved.DaysOfWeek != null)
                         {
@@ -507,13 +560,15 @@ namespace FilesBackup
                     Frequency = frequency,
                     Time = time,
                     DaysOfWeek = daysOfWeek,
-                    RunWithHighestPrivileges = chkHighest.Checked
+                    RunWithHighestPrivileges = chkHighest.Checked,
+                    AcPowerOnly = chkAcOnly.Checked,
+                    WakeToRun = chkWake.Checked
                 };
 
                 Directory.CreateDirectory(Path.GetDirectoryName(schedulePath)!);
                 File.WriteAllText(schedulePath, JsonSerializer.Serialize(schedule, new JsonSerializerOptions { WriteIndented = true }));
 
-                RegisterTaskScheduler(frequency, time, daysOfWeek, chkHighest.Checked);
+                RegisterTaskScheduler(frequency, time, daysOfWeek, chkHighest.Checked, chkAcOnly.Checked, chkWake.Checked);
 
                 MessageBox.Show("スケジュールを保存し、タスクに登録しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -531,7 +586,8 @@ namespace FilesBackup
 
 
         // highest: true のときだけ「最高特権」で実行（既定は標準権限。管理者権限が必要なコピー先のみ有効にする）
-        private void RegisterTaskScheduler(string frequency, TimeSpan time, List<DayOfWeek>? daysOfWeek = null, bool highest = false)
+        private void RegisterTaskScheduler(string frequency, TimeSpan time, List<DayOfWeek>? daysOfWeek = null,
+            bool highest = false, bool acOnly = false, bool wakeToRun = false)
         {
             string exePath = Application.ExecutablePath;
             string taskName = "FilesBackupAutoTask";
@@ -549,6 +605,11 @@ namespace FilesBackup
                 // ★ここがポイント：「スケジュールを逃したらすぐに実行」オプション
                 td.Settings.StartWhenAvailable = true;
                 td.Settings.MultipleInstances = TaskInstancesPolicy.IgnoreNew;
+
+                // 電源条件：AC電源時のみ実行／スリープ中なら起こして実行
+                td.Settings.DisallowStartIfOnBatteries = acOnly;
+                td.Settings.StopIfGoingOnBatteries = acOnly;
+                td.Settings.WakeToRun = wakeToRun;
                 td.Principal.RunLevel = highest ? TaskRunLevel.Highest : TaskRunLevel.LUA;
 
                 // トリガー設定
@@ -594,7 +655,11 @@ namespace FilesBackup
                     if (config?.Paths != null)
                         lstIgnoreItems.Items.AddRange(config.Paths.ToArray());
                     if (config != null)
+                    {
                         chkSkipHiddenSystem.Checked = config.SkipHiddenAndSystem;
+                        chkCompareHash.Checked = config.CompareByHash;
+                        nudParallel.Value = Math.Clamp(config.MaxDegreeOfParallelism, 1, 8);
+                    }
                 }
                 lstIgnoreItems.SelectedIndex = -1;     // ← 無選択に
             }
@@ -635,7 +700,9 @@ namespace FilesBackup
                 var config = new IgnoreConfig
                 {
                     Paths = list,
-                    SkipHiddenAndSystem = chkSkipHiddenSystem.Checked
+                    SkipHiddenAndSystem = chkSkipHiddenSystem.Checked,
+                    CompareByHash = chkCompareHash.Checked,
+                    MaxDegreeOfParallelism = (int)nudParallel.Value
                 };
                 Directory.CreateDirectory(Path.GetDirectoryName(ignorePath)!);
                 File.WriteAllText(ignorePath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
@@ -659,12 +726,16 @@ namespace FilesBackup
             public TimeSpan Time { get; set; }
             public List<DayOfWeek>? DaysOfWeek { get; set; }
             public bool RunWithHighestPrivileges { get; set; } = false;
+            public bool AcPowerOnly { get; set; } = false;
+            public bool WakeToRun { get; set; } = false;
         }
 
         private class IgnoreConfig
         {
             public List<string> Paths { get; set; } = new();
             public bool SkipHiddenAndSystem { get; set; } = false;
+            public bool CompareByHash { get; set; } = false;
+            public int MaxDegreeOfParallelism { get; set; } = 2;
         }
         private void btnAddIgnoreExtension_Click(object sender, EventArgs e)
         {

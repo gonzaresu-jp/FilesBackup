@@ -25,6 +25,14 @@ namespace FilesBackup
         private CheckBox chkSkipHiddenSystem;
         private Label lblIgnoreHint;
         private Button btnPreview;
+        private Button btnPause;
+        private ProgressBar prgBackup;
+        private Label lblStatus;
+        private Label lblParallel;
+        private NumericUpDown nudParallel;
+        private CheckBox chkCompareHash;
+        private CheckBox chkAcOnly;
+        private CheckBox chkWake;
 
         protected override void Dispose(bool disposing)
         {
@@ -85,6 +93,53 @@ namespace FilesBackup
             };
             btnPreview.Click += btnPreview_Click;
 
+            btnPause = new Button
+            {
+                Text = "一時停止",
+                Location = new Point(300, 370),
+                Size = new Size(150, 40),
+                Enabled = false
+            };
+            btnPause.Click += btnPause_Click;
+
+            prgBackup = new ProgressBar
+            {
+                Location = new Point(10, 414),
+                Size = new Size(600, 14),
+                Style = ProgressBarStyle.Continuous
+            };
+
+            lblStatus = new Label
+            {
+                Location = new Point(10, 432),
+                Size = new Size(900, 18),
+                Text = ""
+            };
+
+            // 並列数・ハッシュ比較（バックアップ設定タブの左側）
+            lblParallel = new Label
+            {
+                Text = "並列コピー数",
+                Location = new Point(10, 130),
+                AutoSize = true
+            };
+
+            nudParallel = new NumericUpDown
+            {
+                Location = new Point(10, 150),
+                Size = new Size(70, 25),
+                Minimum = 1,
+                Maximum = 8,
+                Value = 2
+            };
+
+            chkCompareHash = new CheckBox
+            {
+                Text = "ハッシュで比較",
+                Location = new Point(10, 190),
+                AutoSize = true
+            };
+
             // スケジュール：頻度ラベル
             lblFrequency = new Label
             {
@@ -140,13 +195,28 @@ namespace FilesBackup
                 Location = new Point(20, 175),
                 AutoSize = true
             };
+
+            // スケジュール：電源条件
+            chkAcOnly = new CheckBox
+            {
+                Text = "AC電源に接続している時だけ実行する",
+                Location = new Point(20, 200),
+                AutoSize = true
+            };
+
+            chkWake = new CheckBox
+            {
+                Text = "スリープ中なら、スリープを解除して実行する",
+                Location = new Point(20, 225),
+                AutoSize = true
+            };
             clbWeekDays.Items.AddRange(new string[] { "日", "月", "火", "水", "木", "金", "土" });
 
             // スケジュール：保存ボタン
             btnSaveSchedule = new Button
             {
                 Text = "スケジュール保存",
-                Location = new Point(20, 220),
+                Location = new Point(20, 262),
                 Size = new Size(180, 40)
             };
             btnSaveSchedule.Click += btnSaveSchedule_Click;
@@ -253,6 +323,12 @@ namespace FilesBackup
             tabTasks.Controls.Add(btnSave);
             tabTasks.Controls.Add(btnStartBackup);
             tabTasks.Controls.Add(btnPreview);
+            tabTasks.Controls.Add(btnPause);
+            tabTasks.Controls.Add(prgBackup);
+            tabTasks.Controls.Add(lblStatus);
+            tabTasks.Controls.Add(lblParallel);
+            tabTasks.Controls.Add(nudParallel);
+            tabTasks.Controls.Add(chkCompareHash);
 
             tabSchedule.Controls.Add(lblFrequency);
             tabSchedule.Controls.Add(cmbFrequency);
@@ -260,6 +336,8 @@ namespace FilesBackup
             tabSchedule.Controls.Add(dtpScheduleTime);
             tabSchedule.Controls.Add(clbWeekDays);
             tabSchedule.Controls.Add(chkHighest);
+            tabSchedule.Controls.Add(chkAcOnly);
+            tabSchedule.Controls.Add(chkWake);
             tabSchedule.Controls.Add(btnSaveSchedule);
 
             // タブコントロール全体
