@@ -26,7 +26,8 @@ namespace FilesBackup
             AppPaths.MigrateLegacyConfig();
 
             // 旧バージョンで肥大化した履歴ファイルを整理する（起動のたびに数百MBを読み込まないように）
-            Logger.CompactHistoryIfLarge();
+            if (Logger.CompactHistoryIfLarge())
+                MemoryTrimmer.Trim();   // 大きなファイルを読み込んだ分のメモリを返す
 
             if (args.Length > 1 && args[1].Equals("auto", StringComparison.OrdinalIgnoreCase))
                 return RunAuto();

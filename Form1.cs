@@ -31,6 +31,7 @@ namespace FilesBackup
         // ---- 起動モード ----
         private readonly string? _screenshotDir;
         private bool _allowVisible;                 // false の間はウィンドウを出さない（トレイ常駐で起動したとき）
+        private bool _uiBuilt;                      // 画面の部品を作ってあるか（トレイ常駐中は作らずメモリを節約する）
         private bool _trayHintShown;
         private Action? _balloonAction;             // 通知をクリックしたときの動作
         private readonly System.Windows.Forms.Timer _startupTimer = new() { Interval = 1500 };
@@ -138,7 +139,10 @@ namespace FilesBackup
 
             LoadData();
             InitializeTrayIcon();
-            BuildUi();
+
+            // トレイ常駐で起動したときは、ウィンドウを開くまで画面を作らない
+            if (_allowVisible || _screenshotDir != null)
+                BuildUi();
 
             Shown += Form1_Shown;
 
@@ -148,7 +152,11 @@ namespace FilesBackup
                 if (!_allowVisible) CreateHandle();
                 _startupTimer.Tick += StartupTimer_Tick;
                 _startupTimer.Start();
-                _updateTimer.Tick += async (s, e) => await CheckForUpdatesAsync(manual: false);
+                _updateTimer.Tick += async (s, e) =>
+                {
+                    await CheckForUpdatesAsync(manual: false);
+                    if (!Visible && !_backupRunning) MemoryTrimmer.Trim();
+                };
                 _updateTimer.Start();
             }
         }
@@ -269,11 +277,34 @@ namespace FilesBackup
 
             ResumeLayout(true);
             ApplyDwmDarkMode();
+            _uiBuilt = true;
 
             UpdateTiles();
             UpdateUpdateUi();
             SetRunningUi(_backupRunning, _runningDryRun);
             Navigate(_page, _sideKey);
+        }
+
+        /// <summary>
+        /// トレイに隠したときに画面の部品を捨て、メモリを OS に返す（設定や未保存の変更はデータとして残る）。
+        /// バックアップ・アップデート中は進捗を表示するため捨てない。
+        /// </summary>
+        private void ReleaseUiIfIdle()
+        {
+            if (!_uiBuilt || _backupRunning || _updating || Visible || _screenshotDir != null) return;
+
+            CaptureScheduleUi();
+            SuspendLayout();
+            foreach (Control c in Controls.Cast<Control>().ToList())
+            {
+                Controls.Remove(c);
+                c.Dispose();
+            }
+            _views.Clear();
+            _uiBuilt = false;
+            ResumeLayout(false);
+
+            MemoryTrimmer.Trim();
         }
 
         private void AddView(string key, Control view)
@@ -492,6 +523,7 @@ namespace FilesBackup
 
         private void RefreshSide()
         {
+            if (!_uiBuilt) return;
             switch (_page)
             {
                 case "backup":
@@ -747,6 +779,7 @@ namespace FilesBackup
 
         private void UpdateTiles()
         {
+            if (!_uiBuilt) return;
             var last = _history.LastOrDefault();
             if (last == null)
             {
@@ -1270,6 +1303,10 @@ namespace FilesBackup
                 }
                 ShowResult(result, dryRun);
             }
+
+            // バックアップで使ったメモリを返す（ウィンドウを閉じていれば画面も捨てる）
+            if (Visible) MemoryTrimmer.Trim(workingSet: false);
+            else ReleaseUiIfIdle();
         }
 
         private void SetRunningUi(bool running, bool dryRun)
@@ -2101,6 +2138,7 @@ namespace FilesBackup
             {
                 _appSettings.StartWithWindows = tglStartup.Checked;
                 TrySaveAppSettings();
+                if (AppPaths.IsOverridden) return;
                 try { StartupRegistration.Apply(_appSettings.StartWithWindows, Application.ExecutablePath); }
                 catch (Exception ex) { ShowError("自動起動の設定に失敗しました", ex); }
             };
@@ -2461,6 +2499,7 @@ namespace FilesBackup
         public void ShowWindow()
         {
             _allowVisible = true;
+            if (!_uiBuilt) BuildUi();
             Show();
             if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
             BringToFront();
@@ -2476,6 +2515,9 @@ namespace FilesBackup
                 _trayHintShown = true;
                 ShowBalloon("FilesBackup", "タスクトレイで動いています。アイコンをクリックすると開きます。", ToolTipIcon.Info);
             }
+
+            // 閉じるボタンの処理が終わってから画面を捨てる
+            BeginInvoke(ReleaseUiIfIdle);
         }
 
         private void ExitApp()
@@ -2542,9 +2584,12 @@ namespace FilesBackup
         {
             _startupTimer.Stop();
 
-            // サインイン時の自動起動を設定に合わせる
-            try { StartupRegistration.Apply(_appSettings.StartWithWindows, Application.ExecutablePath); }
-            catch (Exception ex) { Logger.Error("自動起動の登録に失敗しました", ex); }
+            // サインイン時の自動起動を設定に合わせる（保存先を差し替えたテスト実行では、PC の設定に触れない）
+            if (!AppPaths.IsOverridden)
+            {
+                try { StartupRegistration.Apply(_appSettings.StartWithWindows, Application.ExecutablePath); }
+                catch (Exception ex) { Logger.Error("自動起動の登録に失敗しました", ex); }
+            }
 
             // アップデートの結果を知らせる
             string? updateResult = UpdateService.TakeResult();
@@ -2560,6 +2605,9 @@ namespace FilesBackup
 
             if (_appSettings.AutoCheckUpdates)
                 await CheckForUpdatesAsync(manual: false);
+
+            // 起動時の処理で使ったメモリを返す（トレイ常駐で待機するだけなので）
+            if (!Visible) MemoryTrimmer.Trim();
         }
 
         // 予定の実行が行われていなければ知らせる（PC の電源が切れていた等）

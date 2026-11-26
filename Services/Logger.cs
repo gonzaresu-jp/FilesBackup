@@ -109,22 +109,27 @@ namespace FilesBackup.Services
         /// 履歴ファイルが大きすぎれば整理する（旧バージョンはエラー内容を全件保存しており、数百MBになることがあった）。
         /// 各回のエラー内容を先頭だけ残して保存し直す。件数や集計は変わらない。
         /// </summary>
-        public static void CompactHistoryIfLarge(long thresholdBytes = 5 * 1024 * 1024)
+        /// <returns>整理した場合 true</returns>
+        public static bool CompactHistoryIfLarge(long thresholdBytes = 5 * 1024 * 1024)
         {
             try
             {
                 var file = new FileInfo(AppPaths.HistoryPath);
-                if (!file.Exists || file.Length < thresholdBytes) return;
+                if (!file.Exists || file.Length < thresholdBytes) return false;
 
                 long before = file.Length;
                 var history = LoadHistory();
-                if (history.Count == 0) return;
+                if (history.Count == 0) return false;
                 SaveHistory(history);
 
                 file.Refresh();
                 Info($"履歴ファイルを整理しました: {before / 1024 / 1024:N0} MB → {file.Length / 1024:N0} KB");
+                return true;
             }
-            catch { }
+            catch
+            {
+                return false;
+            }
         }
 
         public static void AppendHistory(BackupResult result)

@@ -12,7 +12,10 @@
     <Title>FilesBackup</Title>
     <BaseOutputPath>bin\Release\</BaseOutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.1.0</Version>
+    <Version>2.2.0</Version>
+    <!-- 常駐アプリなので、待機中のメモリを小さくする（バックグラウンド GC を使わず、GC はメモリ節約を優先） -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
     <!-- アイコンを作り直すときは、アプリを make-icon オプション付きで起動する（README 参照） -->
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <!-- 依存パッケージの多言語リソースは日本語だけ出力する -->
@@ -27,6 +30,11 @@
 
   <ItemGroup>
     <PackageReference Include="TaskScheduler" Version="2.12.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 0〜9。大きいほどヒープを詰めてメモリを節約する -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
   </ItemGroup>
 
 </Project>

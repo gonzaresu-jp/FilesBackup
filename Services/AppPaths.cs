@@ -23,6 +23,9 @@ namespace FilesBackup.Services
         private static readonly string? OverrideDir =
             Environment.GetEnvironmentVariable("FILESBACKUP_DATA_DIR") is { Length: > 0 } d ? d : null;
 
+        /// <summary>保存先を差し替えて動かしている（テスト・画面写真の作成）。この場合はレジストリなど PC 全体の設定に触れない</summary>
+        public static bool IsOverridden => OverrideDir != null;
+
         /// <summary>管理者運用モードか（起動時に決まる。切り替えたらアプリを再起動する）</summary>
         public static readonly bool IsMachineMode = OverrideDir == null && File.Exists(MachineModeFlagPath);
 
