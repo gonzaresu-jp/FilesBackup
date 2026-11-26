@@ -5,10 +5,16 @@ namespace FilesBackup.Services
 {
     public class BackupManager
     {
+        private static readonly string LogDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FilesBackup", "logs");
+
         public List<BackupTask> Tasks { get; private set; } = new();
 
         public List<string> IgnorePaths { get; set; } = new();         // 除外パス（ファイル・フォルダ）
         public List<string> IgnoreExtensions { get; set; } = new();    // 除外拡張子（例: .log, .tmp）
+
+        // ジャンクション/シンボリックリンク（再解析ポイント）を辿るか。既定は辿らない。
+        public bool FollowReparsePoints { get; set; } = false;
 
         public void LoadFromJson(string jsonPath)
         {
@@ -65,30 +71,57 @@ namespace FilesBackup.Services
         public int ExecuteAll()
         {
             int totalCopied = 0;
+            var ignores = IgnorePaths.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+
             foreach (var task in Tasks)
             {
-                int copied = Copy(task.Source, task.Destination);
-                totalCopied += copied;
-                Console.WriteLine($"[{task.Source} → {task.Destination}] {copied} 個コピーしました");
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(task.Source) || string.IsNullOrWhiteSpace(task.Destination))
+                    {
+                        Log("[SKIP] コピー元またはコピー先が空のため、この設定をスキップします");
+                        continue;
+                    }
+
+                    // コピー元が無い場合は他のタスクを止めずにスキップ
+                    if (!Directory.Exists(task.Source))
+                    {
+                        Log($"[SKIP] コピー元が存在しません: {task.Source}");
+                        continue;
+                    }
+
+                    // コピー先がコピー元（または同一）の配下だと、コピーが自分自身を再帰的に読み続けるため実行しない
+                    if (IsSameOrInside(task.Destination, task.Source))
+                    {
+                        Log($"[SKIP] コピー先がコピー元の配下にあるため実行しません: {task.Source} → {task.Destination}");
+                        continue;
+                    }
+
+                    int copied = Copy(task.Source, task.Destination, ignores);
+                    totalCopied += copied;
+                    Log($"[{task.Source} → {task.Destination}] {copied} 個コピーしました");
+                }
+                catch (Exception ex)
+                {
+                    Log($"[ERROR] {task.Source} → {task.Destination}: {ex.Message}");
+                }
             }
             return totalCopied;
         }
 
-        private int Copy(string src, string dst)
+        private int Copy(string src, string dst, IReadOnlyList<string> ignores)
         {
             int count = 0;
 
-            foreach (var file in EnumerateFilesSafe(src))
+            foreach (var file in EnumerateFilesSafe(src, ignores))
             {
-                string fullPath = Path.GetFullPath(file);
                 string relative = Path.GetRelativePath(src, file);
                 string extension = Path.GetExtension(file).ToLowerInvariant();
 
                 if (IgnoreExtensions.Contains(extension))
                     continue;
 
-                if (IgnorePaths.Any(ignore =>
-                    fullPath.StartsWith(Path.GetFullPath(ignore), StringComparison.OrdinalIgnoreCase)))
+                if (ignores.Any(ignore => IsSameOrInside(file, ignore)))
                     continue;
 
                 string destPath = Path.Combine(dst, relative);
@@ -106,22 +139,22 @@ namespace FilesBackup.Services
                 }
                 catch (UnauthorizedAccessException ex)
                 {
-                    Console.WriteLine($"アクセス拒否: {file} - {ex.Message}");
+                    Log($"[SKIP] アクセス拒否: {file} - {ex.Message}");
                 }
                 catch (IOException ex)
                 {
-                    Console.WriteLine($"IOエラー: {file} - {ex.Message}");
+                    Log($"[SKIP] IOエラー: {file} - {ex.Message}");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"予期せぬエラー: {file} - {ex.Message}");
+                    Log($"[SKIP] 予期せぬエラー: {file} - {ex.Message}");
                 }
             }
 
             return count;
         }
 
-        private IEnumerable<string> EnumerateFilesSafe(string root)
+        private IEnumerable<string> EnumerateFilesSafe(string root, IReadOnlyList<string> ignores)
         {
             var dirs = new Stack<string>();
             dirs.Push(root);
@@ -131,29 +164,81 @@ namespace FilesBackup.Services
                 string currentDir = dirs.Pop();
 
                 // 除外対象ディレクトリならスキップ
-                if (IgnorePaths.Any(ignore =>
-                    Path.GetFullPath(currentDir).Equals(Path.GetFullPath(ignore), StringComparison.OrdinalIgnoreCase)))
+                if (ignores.Any(ignore => IsSameOrInside(currentDir, ignore)))
                     continue;
 
-                string[] files = Array.Empty<string>();
+                string[] files;
+                string[] subDirs;
                 try
                 {
                     files = Directory.GetFiles(currentDir);
-                }
-                catch (UnauthorizedAccessException) { continue; }
-
-                foreach (var file in files)
-                    yield return file;
-
-                string[] subDirs = Array.Empty<string>();
-                try
-                {
                     subDirs = Directory.GetDirectories(currentDir);
                 }
-                catch (UnauthorizedAccessException) { continue; }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                {
+                    // 存在しない・権限がない・パスが長すぎる等は、そのフォルダだけ飛ばして続行
+                    Log($"[SKIP] フォルダを読み取れません: {currentDir} - {ex.Message}");
+                    continue;
+                }
+
+                foreach (var file in files)
+                {
+                    if (!FollowReparsePoints && IsReparsePoint(file))
+                    {
+                        Log($"[SKIP] ジャンクション/シンボリックリンクを除外: {file}");
+                        continue;
+                    }
+                    yield return file;
+                }
 
                 foreach (var dir in subDirs)
+                {
+                    if (!FollowReparsePoints && IsReparsePoint(dir))
+                    {
+                        Log($"[SKIP] ジャンクション/シンボリックリンクを除外: {dir}");
+                        continue;
+                    }
                     dirs.Push(dir);
+                }
+            }
+        }
+
+        // path が parent と同じ、またはその配下にあるか（"C:\foo" と "C:\foobar" を取り違えないよう区切り文字で判定）
+        private static bool IsSameOrInside(string path, string parent)
+        {
+            char[] seps = { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar };
+            string p = Path.GetFullPath(path).TrimEnd(seps);
+            string r = Path.GetFullPath(parent).TrimEnd(seps);
+
+            return p.Equals(r, StringComparison.OrdinalIgnoreCase)
+                || p.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsReparsePoint(string path)
+        {
+            try
+            {
+                return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // コンソール（自動実行時は見えない）と日付別ログファイルの両方へ出力
+        private static void Log(string message)
+        {
+            string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}";
+            Console.WriteLine(line);
+            try
+            {
+                Directory.CreateDirectory(LogDir);
+                File.AppendAllText(Path.Combine(LogDir, $"{DateTime.Now:yyyyMMdd}.log"), line + Environment.NewLine);
+            }
+            catch
+            {
+                // ログ書き込み失敗でバックアップ自体を止めない
             }
         }
     }
