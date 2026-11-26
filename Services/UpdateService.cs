@@ -280,7 +280,9 @@ namespace FilesBackup.Services
 
                 $staging = Join-Path (Split-Path -Parent $Zip) 'staging'
                 if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
-                Expand-Archive -Path $Zip -DestinationPath $staging -Force
+                # Expand-Archive fails on some Windows PowerShell 5.1 setups, so use .NET directly.
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $staging)
 
                 $exe = Get-ChildItem -Path $staging -Recurse -Filter 'FilesBackup.exe' | Select-Object -First 1
                 if (-not $exe) { throw 'FilesBackup.exe was not found in the update package.' }
