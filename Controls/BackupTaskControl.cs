@@ -20,6 +20,9 @@ namespace FilesBackup
         private Button btnUp;
         private Button btnDown;
 
+        // ボタンの説明（ツールチップ）。コンポーネントは保持しておかないと表示が消えるためフィールドにする
+        private readonly ToolTip _tip = new();
+
         // 初期セット時の通知抑制
         private bool _suppressNotify = false;
 
@@ -85,6 +88,12 @@ namespace FilesBackup
                 if (dialog.ShowDialog() == DialogResult.OK)
                     txtDestination.Text = dialog.SelectedPath; // TextChanged経由で通知される
             };
+
+            _tip.SetToolTip(btnUp, "上へ移動（上から順に実行されます）");
+            _tip.SetToolTip(btnDown, "下へ移動");
+            _tip.SetToolTip(btnBrowseSource, "コピー元フォルダを選択");
+            _tip.SetToolTip(btnBrowseDestination, "コピー先フォルダを選択");
+            _tip.SetToolTip(btnRemove, "この設定を削除");
 
             Controls.Add(btnUp);
             Controls.Add(btnDown);

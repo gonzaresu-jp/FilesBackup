@@ -21,6 +21,10 @@ namespace FilesBackup
         private DateTimePicker dtpScheduleTime;
         private CheckedListBox clbWeekDays;
         private Button btnSaveSchedule;
+        private CheckBox chkHighest;
+        private CheckBox chkSkipHiddenSystem;
+        private Label lblIgnoreHint;
+        private Button btnPreview;
 
         protected override void Dispose(bool disposing)
         {
@@ -73,6 +77,14 @@ namespace FilesBackup
             };
             btnStartBackup.Click += btnStartBackup_Click;
 
+            btnPreview = new Button
+            {
+                Text = "プレビュー",
+                Location = new Point(460, 370),
+                Size = new Size(150, 40)
+            };
+            btnPreview.Click += btnPreview_Click;
+
             // スケジュール：頻度ラベル
             lblFrequency = new Label
             {
@@ -102,18 +114,31 @@ namespace FilesBackup
             // スケジュール：時刻選択
             dtpScheduleTime = new DateTimePicker
             {
-                Format = DateTimePickerFormat.Time,
+                Format = DateTimePickerFormat.Custom,
+                CustomFormat = "HH:mm",           // 秒は表示しない
                 ShowUpDown = true,
                 Location = new Point(100, 65),
                 Width = 100
             };
 
-            // スケジュール：曜日選択（毎週のみ）
+            // スケジュール：曜日選択（毎週のみ）。1行に並べてスクロール不要にする
             clbWeekDays = new CheckedListBox
             {
                 Location = new Point(20, 110),
-                Size = new Size(300, 100),
+                Size = new Size(430, 34),
+                MultiColumn = true,
+                ColumnWidth = 60,
+                CheckOnClick = true,
+                BorderStyle = BorderStyle.FixedSingle,
                 Visible = false
+            };
+
+            // スケジュール：最高特権で実行（既定はオフ）
+            chkHighest = new CheckBox
+            {
+                Text = "最高特権で実行する（管理者権限が必要なコピー先のみオンにしてください）",
+                Location = new Point(20, 175),
+                AutoSize = true
             };
             clbWeekDays.Items.AddRange(new string[] { "日", "月", "火", "水", "木", "金", "土" });
 
@@ -196,6 +221,23 @@ namespace FilesBackup
             };
             btnRemoveIgnoreItem.Click += btnRemoveIgnoreItem_Click;
 
+            lblIgnoreHint = new Label
+            {
+                Text = "※ * や ? でワイルドカード指定できます（例: **/Cache/**, *.tmp）",
+                Location = new Point(20, 324),
+                AutoSize = true,
+                ForeColor = Color.Gray
+            };
+
+            chkSkipHiddenSystem = new CheckBox
+            {
+                Text = "隠し/システム属性のファイル・フォルダを除外する",
+                Location = new Point(20, 380),
+                AutoSize = true
+            };
+
+            tabIgnore.Controls.Add(lblIgnoreHint);
+            tabIgnore.Controls.Add(chkSkipHiddenSystem);
             tabIgnore.Controls.Add(lstIgnoreItems);
             tabIgnore.Controls.Add(btnAddIgnoreFile);
             tabIgnore.Controls.Add(btnAddIgnoreFolder);
@@ -210,12 +252,14 @@ namespace FilesBackup
             tabTasks.Controls.Add(btnAddTask);
             tabTasks.Controls.Add(btnSave);
             tabTasks.Controls.Add(btnStartBackup);
+            tabTasks.Controls.Add(btnPreview);
 
             tabSchedule.Controls.Add(lblFrequency);
             tabSchedule.Controls.Add(cmbFrequency);
             tabSchedule.Controls.Add(lblScheduleTime);
             tabSchedule.Controls.Add(dtpScheduleTime);
             tabSchedule.Controls.Add(clbWeekDays);
+            tabSchedule.Controls.Add(chkHighest);
             tabSchedule.Controls.Add(btnSaveSchedule);
 
             // タブコントロール全体

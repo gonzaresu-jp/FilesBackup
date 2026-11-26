@@ -65,6 +65,8 @@ namespace FilesBackup
             cmbFrequency.SelectedIndexChanged += (s, e) => MarkScheduleModified();
             dtpScheduleTime.ValueChanged += (s, e) => MarkScheduleModified();
             clbWeekDays.ItemCheck += (s, e) => MarkScheduleModified();
+            chkHighest.CheckedChanged += (s, e) => MarkScheduleModified();
+            chkSkipHiddenSystem.CheckedChanged += (s, e) => MarkIgnoreModified();
 
             lstIgnoreItems.SelectedIndexChanged += (s, e) => MarkIgnoreModified();
             btnAddIgnoreFile.Click += (s, e) => MarkIgnoreModified();
@@ -217,12 +219,12 @@ namespace FilesBackup
                     }
                 }
 
-                // コピー先がコピー元の配下になっている設定は保存させない（無限コピー防止）
-                var selfCopyErrors = BackupManager.FindSelfCopyErrors(tasks);
-                if (selfCopyErrors.Count > 0)
+                // 危険な設定（コピー元の配下・システム領域への書き込み）は保存させない
+                var configErrors = BackupManager.FindConfigErrors(tasks);
+                if (configErrors.Count > 0)
                 {
                     MessageBox.Show(
-                        "次の設定はコピー先がコピー元の配下のため保存できません。\n\n" + string.Join("\n", selfCopyErrors),
+                        "次の設定は危険なため保存できません。修正してください。\n\n" + string.Join("\n", configErrors),
                         "保存できません", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -249,11 +251,11 @@ namespace FilesBackup
                 // 拡張子除外を正しく効かせる（個別デシリアライズではなく専用ローダーを使う）
                 manager.LoadIgnoreList(ignorePath);
 
-                var selfCopyErrors = BackupManager.FindSelfCopyErrors(manager.Tasks);
-                if (selfCopyErrors.Count > 0)
+                var configErrors = BackupManager.FindConfigErrors(manager.Tasks);
+                if (configErrors.Count > 0)
                 {
                     MessageBox.Show(
-                        "次の設定はコピー先がコピー元の配下のため実行できません。設定を修正してください。\n\n" + string.Join("\n", selfCopyErrors),
+                        "次の設定は危険なため実行できません。設定を修正してください。\n\n" + string.Join("\n", configErrors),
                         "実行できません", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -287,6 +289,30 @@ namespace FilesBackup
                 _backupCts?.Dispose();
                 _backupCts = null;
                 btnStartBackup.Enabled = true;
+            }
+        }
+
+        // ドライラン：コピーせず、コピーされる予定の件数だけ表示する
+        private async void btnPreview_Click(object sender, EventArgs e)
+        {
+            if (_backupCts != null) return;   // 本番実行中は無効
+
+            try
+            {
+                var manager = new BackupManager();
+                manager.LoadFromJson(configPath);
+                manager.LoadIgnoreList(ignorePath);
+
+                int count = await System.Threading.Tasks.Task.Run(
+                    () => manager.ExecuteAll(CancellationToken.None, dryRun: true));
+
+                MessageBox.Show(
+                    $"実行するとコピーされる予定のファイル：{count} 件\n（実際にはコピーしていません）",
+                    "プレビュー", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"プレビュー中にエラーが発生しました: {ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -428,6 +454,7 @@ namespace FilesBackup
                     {
                         dtpScheduleTime.Value = DateTime.Today.Add(saved.Time); // 時刻
                         cmbFrequency.SelectedItem = saved.Frequency;            // 頻度
+                        chkHighest.Checked = saved.RunWithHighestPrivileges;    // 最高特権
 
                         if (saved.Frequency == "毎週" && saved.DaysOfWeek != null)
                         {
@@ -479,13 +506,14 @@ namespace FilesBackup
                 {
                     Frequency = frequency,
                     Time = time,
-                    DaysOfWeek = daysOfWeek
+                    DaysOfWeek = daysOfWeek,
+                    RunWithHighestPrivileges = chkHighest.Checked
                 };
 
                 Directory.CreateDirectory(Path.GetDirectoryName(schedulePath)!);
                 File.WriteAllText(schedulePath, JsonSerializer.Serialize(schedule, new JsonSerializerOptions { WriteIndented = true }));
 
-                RegisterTaskScheduler(frequency, time, daysOfWeek);
+                RegisterTaskScheduler(frequency, time, daysOfWeek, chkHighest.Checked);
 
                 MessageBox.Show("スケジュールを保存し、タスクに登録しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -502,7 +530,8 @@ namespace FilesBackup
         }
 
 
-        private void RegisterTaskScheduler(string frequency, TimeSpan time, List<DayOfWeek>? daysOfWeek = null)
+        // highest: true のときだけ「最高特権」で実行（既定は標準権限。管理者権限が必要なコピー先のみ有効にする）
+        private void RegisterTaskScheduler(string frequency, TimeSpan time, List<DayOfWeek>? daysOfWeek = null, bool highest = false)
         {
             string exePath = Application.ExecutablePath;
             string taskName = "FilesBackupAutoTask";
@@ -520,7 +549,7 @@ namespace FilesBackup
                 // ★ここがポイント：「スケジュールを逃したらすぐに実行」オプション
                 td.Settings.StartWhenAvailable = true;
                 td.Settings.MultipleInstances = TaskInstancesPolicy.IgnoreNew;
-                td.Principal.RunLevel = TaskRunLevel.Highest; // 管理者実行
+                td.Principal.RunLevel = highest ? TaskRunLevel.Highest : TaskRunLevel.LUA;
 
                 // トリガー設定
                 if (frequency == "毎日")
@@ -564,6 +593,8 @@ namespace FilesBackup
                     lstIgnoreItems.Items.Clear();
                     if (config?.Paths != null)
                         lstIgnoreItems.Items.AddRange(config.Paths.ToArray());
+                    if (config != null)
+                        chkSkipHiddenSystem.Checked = config.SkipHiddenAndSystem;
                 }
                 lstIgnoreItems.SelectedIndex = -1;     // ← 無選択に
             }
@@ -601,7 +632,11 @@ namespace FilesBackup
                 foreach (var item in lstIgnoreItems.Items)
                     list.Add(item.ToString()!);
 
-                var config = new IgnoreConfig { Paths = list };
+                var config = new IgnoreConfig
+                {
+                    Paths = list,
+                    SkipHiddenAndSystem = chkSkipHiddenSystem.Checked
+                };
                 Directory.CreateDirectory(Path.GetDirectoryName(ignorePath)!);
                 File.WriteAllText(ignorePath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
 
@@ -623,11 +658,13 @@ namespace FilesBackup
             public string Frequency { get; set; } = "毎日";
             public TimeSpan Time { get; set; }
             public List<DayOfWeek>? DaysOfWeek { get; set; }
+            public bool RunWithHighestPrivileges { get; set; } = false;
         }
 
         private class IgnoreConfig
         {
             public List<string> Paths { get; set; } = new();
+            public bool SkipHiddenAndSystem { get; set; } = false;
         }
         private void btnAddIgnoreExtension_Click(object sender, EventArgs e)
         {

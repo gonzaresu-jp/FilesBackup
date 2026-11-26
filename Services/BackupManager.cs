@@ -1,4 +1,6 @@
-﻿using System.Text.Json;
+﻿using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using FilesBackup.Models;
 
 namespace FilesBackup.Services
@@ -8,10 +10,18 @@ namespace FilesBackup.Services
         private static readonly string LogDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FilesBackup", "logs");
 
+        private const int MaxCopyAttempts = 3;                                  // IOエラー時の試行回数
+        private const int LogRetentionDays = 30;                                // ログの保持日数
+        private static readonly TimeSpan TimestampTolerance = TimeSpan.FromSeconds(2); // NAS/FAT の時刻精度差を吸収
+
         public List<BackupTask> Tasks { get; private set; } = new();
 
         public List<string> IgnorePaths { get; set; } = new();         // 除外パス（ファイル・フォルダ）
         public List<string> IgnoreExtensions { get; set; } = new();    // 除外拡張子（例: .log, .tmp）
+        public List<Regex> IgnoreGlobs { get; private set; } = new();  // ワイルドカード除外（例: **/Cache/**）
+
+        // 隠し/システム属性のファイル・フォルダをスキップするか
+        public bool SkipHiddenAndSystem { get; set; } = false;
 
         // ジャンクション/シンボリックリンク（再解析ポイント）を辿るか。既定は辿らない。
         public bool FollowReparsePoints { get; set; } = false;
@@ -28,10 +38,13 @@ namespace FilesBackup.Services
         private class IgnoreConfig
         {
             public List<string> Paths { get; set; } = new();
+            public bool SkipHiddenAndSystem { get; set; } = false;
         }
 
         public void LoadIgnoreList(string ignorePath)
         {
+            var entries = new List<string>();
+
             if (File.Exists(ignorePath))
             {
                 string json = File.ReadAllText(ignorePath);
@@ -39,16 +52,24 @@ namespace FilesBackup.Services
 
                 if (config != null)
                 {
-                    IgnorePaths = config.Paths
-                        .Where(x => !x.StartsWith("*.") && !x.StartsWith("."))
-                        .ToList();
-
-                    IgnoreExtensions = config.Paths
-                        .Where(x => x.StartsWith("*.") || x.StartsWith("."))
-                        .Select(x => x.TrimStart('*').ToLowerInvariant())
-                        .ToList();
+                    SkipHiddenAndSystem = config.SkipHiddenAndSystem;
+                    entries = config.Paths.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
                 }
             }
+
+            IgnoreExtensions = entries
+                .Where(IsExtensionEntry)
+                .Select(x => x.TrimStart('*').ToLowerInvariant())
+                .ToList();
+
+            IgnoreGlobs = entries
+                .Where(x => !IsExtensionEntry(x) && IsGlob(x))
+                .Select(GlobToRegex)
+                .ToList();
+
+            IgnorePaths = entries
+                .Where(x => !IsExtensionEntry(x) && !IsGlob(x))
+                .ToList();
 
             // 強制除外対象（全ドライブ共通）
             var systemFolders = new[]
@@ -68,10 +89,15 @@ namespace FilesBackup.Services
             }
         }
 
-        // コピー先がコピー元（または同一）の配下になっている設定を列挙する（保存時・実行時の警告用）
-        public static List<string> FindSelfCopyErrors(IEnumerable<BackupTask> tasks)
+        // 設定の問題を列挙する（保存時・実行時の警告用）
+        //  - コピー先がコピー元（または同一）の配下 → 無限コピーになるため不可
+        //  - コピー先がシステムの保護領域（Windows・Program Files など）や、システムドライブ直下 → 誤操作防止のため不可
+        public static List<string> FindConfigErrors(IEnumerable<BackupTask> tasks)
         {
             var errors = new List<string>();
+            var protectedDirs = GetProtectedDirectories();
+            string systemRoot = Path.GetFullPath(Path.GetPathRoot(Environment.SystemDirectory)!).TrimEnd('\\');
+
             foreach (var task in tasks)
             {
                 if (string.IsNullOrWhiteSpace(task.Source) || string.IsNullOrWhiteSpace(task.Destination))
@@ -80,20 +106,37 @@ namespace FilesBackup.Services
                 try
                 {
                     if (IsSameOrInside(task.Destination, task.Source))
+                    {
                         errors.Add($"コピー先がコピー元の配下になっています: {task.Source} → {task.Destination}");
+                        continue;
+                    }
+
+                    if (Path.GetFullPath(task.Destination).TrimEnd('\\').Equals(systemRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        errors.Add($"コピー先がシステムドライブ直下です: {task.Destination}");
+                        continue;
+                    }
+
+                    string? hit = protectedDirs.FirstOrDefault(p => IsSameOrInside(task.Destination, p));
+                    if (hit != null)
+                        errors.Add($"コピー先がシステムの保護領域です: {task.Destination}（{hit}）");
                 }
                 catch (Exception ex)
                 {
-                    errors.Add($"パスが不正です: {task.Source} → {task.Destination} ({ex.Message})");
+                    errors.Add($"パスが不正です: {task.Source} → {task.Destination}（{ex.Message}）");
                 }
             }
             return errors;
         }
 
-        public int ExecuteAll(CancellationToken cancellationToken = default)
+        // ドライラン：実際にはコピーせず、コピーされる予定の件数だけ数える
+        public int ExecuteAll(CancellationToken cancellationToken = default, bool dryRun = false)
         {
+            CleanOldLogs();
+
             int totalCopied = 0;
-            var ignores = IgnorePaths.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+            var ignores = IgnorePaths.ToList();
+            string tag = dryRun ? "[DRY-RUN] " : "";
 
             foreach (var task in Tasks)
             {
@@ -114,16 +157,16 @@ namespace FilesBackup.Services
                         continue;
                     }
 
-                    // コピー先がコピー元（または同一）の配下だと、コピーが自分自身を再帰的に読み続けるため実行しない
-                    if (IsSameOrInside(task.Destination, task.Source))
+                    var errors = FindConfigErrors(new[] { task });
+                    if (errors.Count > 0)
                     {
-                        Log($"[SKIP] コピー先がコピー元の配下にあるため実行しません: {task.Source} → {task.Destination}");
+                        Log($"[SKIP] {errors[0]}");
                         continue;
                     }
 
-                    int copied = Copy(task.Source, task.Destination, ignores, cancellationToken);
+                    int copied = Copy(task.Source, task.Destination, ignores, cancellationToken, dryRun);
                     totalCopied += copied;
-                    Log($"[{task.Source} → {task.Destination}] {copied} 個コピーしました");
+                    Log($"{tag}[{task.Source} → {task.Destination}] {copied} 個{(dryRun ? "コピー予定" : "コピーしました")}");
                 }
                 catch (OperationCanceledException)
                 {
@@ -138,7 +181,7 @@ namespace FilesBackup.Services
             return totalCopied;
         }
 
-        private int Copy(string src, string dst, IReadOnlyList<string> ignores, CancellationToken cancellationToken)
+        private int Copy(string src, string dst, IReadOnlyList<string> ignores, CancellationToken cancellationToken, bool dryRun)
         {
             int count = 0;
 
@@ -152,21 +195,22 @@ namespace FilesBackup.Services
                 if (IgnoreExtensions.Contains(extension))
                     continue;
 
-                if (ignores.Any(ignore => IsSameOrInside(file, ignore)))
+                if (IsExcluded(file, ignores))
                     continue;
 
                 string destPath = Path.Combine(dst, relative);
 
                 try
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                    if (!NeedsCopy(file, destPath))
+                        continue;
 
-                    if (!File.Exists(destPath) ||
-                        File.GetLastWriteTimeUtc(file) > File.GetLastWriteTimeUtc(destPath))
+                    if (!dryRun)
                     {
-                        File.Copy(file, destPath, true);
-                        count++;
+                        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                        CopyWithRetry(file, destPath);
                     }
+                    count++;
                 }
                 catch (UnauthorizedAccessException ex)
                 {
@@ -185,6 +229,32 @@ namespace FilesBackup.Services
             return count;
         }
 
+        // コピーが必要か：コピー先が無い、またはコピー元が許容誤差より新しい場合
+        private static bool NeedsCopy(string src, string dst)
+        {
+            if (!File.Exists(dst))
+                return true;
+
+            return File.GetLastWriteTimeUtc(src) - File.GetLastWriteTimeUtc(dst) > TimestampTolerance;
+        }
+
+        // 一時的なIOエラー（ファイルのロード中など）は少し待って再試行する
+        private static void CopyWithRetry(string src, string dst)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Copy(src, dst, true);
+                    return;
+                }
+                catch (IOException) when (attempt < MaxCopyAttempts)
+                {
+                    Thread.Sleep(TimeSpan.FromSeconds(attempt));
+                }
+            }
+        }
+
         private IEnumerable<string> EnumerateFilesSafe(string root, IReadOnlyList<string> ignores)
         {
             var dirs = new Stack<string>();
@@ -195,7 +265,7 @@ namespace FilesBackup.Services
                 string currentDir = dirs.Pop();
 
                 // 除外対象ディレクトリならスキップ
-                if (ignores.Any(ignore => IsSameOrInside(currentDir, ignore)))
+                if (IsExcluded(currentDir, ignores))
                     continue;
 
                 string[] files;
@@ -214,6 +284,9 @@ namespace FilesBackup.Services
 
                 foreach (var file in files)
                 {
+                    if (SkipHiddenAndSystem && IsHiddenOrSystem(file))
+                        continue;
+
                     if (!FollowReparsePoints && IsReparsePoint(file))
                     {
                         Log($"[SKIP] ジャンクション/シンボリックリンクを除外: {file}");
@@ -224,6 +297,9 @@ namespace FilesBackup.Services
 
                 foreach (var dir in subDirs)
                 {
+                    if (SkipHiddenAndSystem && IsHiddenOrSystem(dir))
+                        continue;
+
                     if (!FollowReparsePoints && IsReparsePoint(dir))
                     {
                         Log($"[SKIP] ジャンクション/シンボリックリンクを除外: {dir}");
@@ -232,6 +308,89 @@ namespace FilesBackup.Services
                     dirs.Push(dir);
                 }
             }
+        }
+
+        // 除外パス（配下を含む）またはワイルドカード除外に一致するか
+        private bool IsExcluded(string path, IReadOnlyList<string> ignores)
+        {
+            if (ignores.Any(ignore => IsSameOrInside(path, ignore)))
+                return true;
+
+            if (IgnoreGlobs.Count > 0)
+            {
+                string normalized = Path.GetFullPath(path).Replace('\\', '/');
+                if (IgnoreGlobs.Any(rx => rx.IsMatch(normalized)))
+                    return true;
+            }
+            return false;
+        }
+
+        // "*.tmp" や ".tmp" の形式（拡張子指定）か
+        private static bool IsExtensionEntry(string entry) =>
+            Regex.IsMatch(entry, @"^\*?\.[^\\/*?:]+$");
+
+        private static bool IsGlob(string entry) =>
+            entry.IndexOfAny(new[] { '*', '?' }) >= 0;
+
+        // ワイルドカードを正規表現に変換（* は区切り内、** は区切りをまたぐ、? は1文字）
+        private static Regex GlobToRegex(string glob)
+        {
+            string g = glob.Replace('\\', '/');
+            var sb = new StringBuilder("^");
+
+            for (int i = 0; i < g.Length; i++)
+            {
+                char c = g[i];
+
+                if (c == '*' && i + 1 < g.Length && g[i + 1] == '*')
+                {
+                    if (i + 2 < g.Length && g[i + 2] == '/')
+                    {
+                        // "**/" は 0 個以上のフォルダ
+                        sb.Append("(?:.*/)?");
+                        i += 2;
+                    }
+                    else if (i + 2 == g.Length && sb.Length > 0 && sb[sb.Length - 1] == '/')
+                    {
+                        // 末尾の "/**" は、そのフォルダ自身とその配下すべて
+                        sb.Length--;
+                        sb.Append("(?:/.*)?");
+                        i++;
+                    }
+                    else
+                    {
+                        sb.Append(".*");
+                        i++;
+                    }
+                }
+                else if (c == '*')
+                {
+                    sb.Append("[^/]*");
+                }
+                else if (c == '?')
+                {
+                    sb.Append("[^/]");
+                }
+                else
+                {
+                    sb.Append(Regex.Escape(c.ToString()));
+                }
+            }
+
+            sb.Append('$');
+            return new Regex(sb.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static IEnumerable<string> GetProtectedDirectories()
+        {
+            var candidates = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+            };
+            return candidates.Where(p => !string.IsNullOrWhiteSpace(p));
         }
 
         // path が parent と同じ、またはその配下にあるか（"C:\foo" と "C:\foobar" を取り違えないよう区切り文字で判定）
@@ -254,6 +413,39 @@ namespace FilesBackup.Services
             catch
             {
                 return false;
+            }
+        }
+
+        private static bool IsHiddenOrSystem(string path)
+        {
+            try
+            {
+                return (File.GetAttributes(path) & (FileAttributes.Hidden | FileAttributes.System)) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // 保持日数より古いログファイルを削除する（失敗しても続行）
+        private static void CleanOldLogs()
+        {
+            try
+            {
+                if (!Directory.Exists(LogDir))
+                    return;
+
+                DateTime limit = DateTime.Now.AddDays(-LogRetentionDays);
+                foreach (var file in Directory.GetFiles(LogDir, "*.log"))
+                {
+                    if (File.GetLastWriteTime(file) < limit)
+                        File.Delete(file);
+                }
+            }
+            catch
+            {
+                // ログ整理の失敗でバックアップを止めない
             }
         }
 
