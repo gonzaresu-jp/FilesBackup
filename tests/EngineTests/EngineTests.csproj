@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    バックアップエンジンの動作確認（コンソールアプリ）。
+    実行: リポジトリ直下で dotnet run (project オプションに tests/EngineTests を指定)
+    設定・ログ・履歴は一時フォルダに書き込むため、実際の環境には影響しない。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SatelliteResourceLanguages>ja</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TaskScheduler" Version="2.12.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Models\*.cs" />
+    <Compile Include="..\..\Services\*.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

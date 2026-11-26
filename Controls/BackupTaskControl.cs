@@ -1,4 +1,4 @@
-﻿// BackupTaskControl.cs
+// BackupTaskControl.cs
 using FilesBackup.Models;
 
 namespace FilesBackup
@@ -8,23 +8,20 @@ namespace FilesBackup
         public event EventHandler? OnRemoveRequested;
         public event EventHandler? OnMoveUpRequested;
         public event EventHandler? OnMoveDownRequested;
-
-        // ★追加：編集通知イベント
         public event EventHandler? OnChanged;
 
-        private TextBox txtSource;
-        private TextBox txtDestination;
-        private Button btnBrowseSource;
-        private Button btnBrowseDestination;
-        private Button btnRemove;
-        private Button btnUp;
-        private Button btnDown;
+        private TextBox txtSource = null!;
+        private TextBox txtDestination = null!;
+        private Button btnBrowseSource = null!;
+        private Button btnBrowseDestination = null!;
+        private Button btnRemove = null!;
+        private Button btnUp = null!;
+        private Button btnDown = null!;
+
+        private bool _suppressNotify = false;
 
         // ボタンの説明（ツールチップ）。コンポーネントは保持しておかないと表示が消えるためフィールドにする
         private readonly ToolTip _tip = new();
-
-        // 初期セット時の通知抑制
-        private bool _suppressNotify = false;
 
         public string Source
         {
@@ -51,42 +48,42 @@ namespace FilesBackup
         public BackupTaskControl()
         {
             InitializeComponent();
+            ApplyTheme();
         }
 
         private void InitializeComponent()
         {
-            btnUp = new Button() { Text = "↑", Width = 30, Height = 30 };
-            btnDown = new Button() { Text = "↓", Width = 30, Height = 30 };
-            txtSource = new TextBox() { Width = 200 };
-            btnBrowseSource = new Button() { Text = "参照", Width = 50 };
-            txtDestination = new TextBox() { Width = 200 };
-            btnBrowseDestination = new Button() { Text = "参照", Width = 50 };
-            btnRemove = new Button() { Text = "削除", Width = 50 };
+            btnUp = new Button() { Text = "↑", Width = 30, Height = 30, FlatStyle = FlatStyle.Flat };
+            btnDown = new Button() { Text = "↓", Width = 30, Height = 30, FlatStyle = FlatStyle.Flat };
+            txtSource = new TextBox() { Width = 200, BorderStyle = BorderStyle.FixedSingle };
+            btnBrowseSource = new Button() { Text = "...", Width = 30, Height = 30, FlatStyle = FlatStyle.Flat };
+            txtDestination = new TextBox() { Width = 200, BorderStyle = BorderStyle.FixedSingle };
+            btnBrowseDestination = new Button() { Text = "...", Width = 30, Height = 30, FlatStyle = FlatStyle.Flat };
+            btnRemove = new Button() { Text = "×", Width = 30, Height = 30, FlatStyle = FlatStyle.Flat };
 
-            this.Height = 40;
-            this.Width = 820;
+            this.Height = 50;
+            this.Width = 850;
+            this.Margin = new Padding(0, 0, 0, 10);
 
-            // 既存イベント
+            // イベント
             btnUp.Click += (s, e) => { OnMoveUpRequested?.Invoke(this, EventArgs.Empty); FireChanged(); };
             btnDown.Click += (s, e) => { OnMoveDownRequested?.Invoke(this, EventArgs.Empty); FireChanged(); };
             btnRemove.Click += (s, e) => { OnRemoveRequested?.Invoke(this, EventArgs.Empty); FireChanged(); };
 
-            // ★テキスト編集を検知
             txtSource.TextChanged += (s, e) => FireChanged();
             txtDestination.TextChanged += (s, e) => FireChanged();
 
-            // ★参照ボタンでパス決定時も検知
             btnBrowseSource.Click += (s, e) =>
             {
                 using var dialog = new FolderBrowserDialog();
                 if (dialog.ShowDialog() == DialogResult.OK)
-                    txtSource.Text = dialog.SelectedPath; // TextChanged経由で通知される
+                    txtSource.Text = dialog.SelectedPath;
             };
             btnBrowseDestination.Click += (s, e) =>
             {
                 using var dialog = new FolderBrowserDialog();
                 if (dialog.ShowDialog() == DialogResult.OK)
-                    txtDestination.Text = dialog.SelectedPath; // TextChanged経由で通知される
+                    txtDestination.Text = dialog.SelectedPath;
             };
 
             _tip.SetToolTip(btnUp, "上へ移動（上から順に実行されます）");
@@ -103,25 +100,53 @@ namespace FilesBackup
             Controls.Add(btnBrowseDestination);
             Controls.Add(btnRemove);
 
-            int x = 0;
-            btnUp.Location = new Point(x, 5);
+            int x = 5;
+            btnUp.Location = new Point(x, 10);
             x += btnUp.Width + 2;
-            btnDown.Location = new Point(x, 5);
+            btnDown.Location = new Point(x, 10);
 
-            x += btnDown.Width + 10;
-            txtSource.Location = new Point(x, 5);
-
+            x += btnDown.Width + 15;
+            txtSource.Location = new Point(x, 12);
             x += txtSource.Width + 5;
-            btnBrowseSource.Location = new Point(x, 5);
+            btnBrowseSource.Location = new Point(x, 10);
 
-            x += btnBrowseSource.Width + 5;
-            txtDestination.Location = new Point(x, 5);
-
+            x += btnBrowseSource.Width + 20;
+            txtDestination.Location = new Point(x, 12);
             x += txtDestination.Width + 5;
-            btnBrowseDestination.Location = new Point(x, 5);
+            btnBrowseDestination.Location = new Point(x, 10);
 
-            x += btnBrowseDestination.Width + 5;
-            btnRemove.Location = new Point(x, 5);
+            x += btnBrowseDestination.Width + 20;
+            btnRemove.Location = new Point(x, 10);
+            
+            // 全体へのホバー効果
+            this.MouseEnter += (s, e) => this.BackColor = Form1.ModernTheme.HoverBg;
+            this.MouseLeave += (s, e) => this.BackColor = Form1.ModernTheme.Background;
+        }
+
+        public void ApplyTheme()
+        {
+            this.BackColor = Form1.ModernTheme.Background;
+            this.Font = new Font("Segoe UI", 10);
+
+            foreach (Control c in Controls)
+            {
+                c.Font = this.Font;
+                if (c is Button b)
+                {
+                    b.BackColor = Form1.ModernTheme.HoverBg;
+                    b.ForeColor = Form1.ModernTheme.TextPrimary;
+                    b.FlatAppearance.BorderSize = 0;
+                    b.MouseEnter += (s, e) => b.BackColor = Form1.ModernTheme.Border;
+                    b.MouseLeave += (s, e) => b.BackColor = Form1.ModernTheme.HoverBg;
+                }
+                else if (c is TextBox t)
+                {
+                    t.BackColor = Form1.ModernTheme.Surface;
+                    t.ForeColor = Form1.ModernTheme.TextPrimary;
+                }
+            }
+            
+            btnRemove.ForeColor = Color.FromArgb(220, 38, 38);
         }
 
         private void FireChanged()
@@ -136,7 +161,6 @@ namespace FilesBackup
             Destination = this.Destination,
         };
 
-        // ★初期化時は通知抑制してセット
         public void SetTask(BackupTask task, bool silent = false)
         {
             _suppressNotify = silent;
