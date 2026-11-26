@@ -2788,10 +2788,10 @@ namespace FilesBackup
                     updateProgress.Value = (float)p;
                     SetUpdateStatus($"ダウンロードしています... {p:P0}");
                 });
-                string zip = await UpdateService.DownloadAsync(_update, progressReporter);
+                string package = await UpdateService.DownloadAsync(_update, installDir, progressReporter);
 
                 SetUpdateStatus("インストールを開始します...");
-                UpdateService.LaunchInstaller(zip, installDir);
+                UpdateService.LaunchInstaller(package, installDir);
             }
             catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
             {

@@ -9,15 +9,19 @@ using System.Text.RegularExpressions;
 
 namespace FilesBackup.Services
 {
+    /// <summary>リリースに添付されたファイル</summary>
+    public sealed record ReleaseAsset(string Name, string Url, long Size, string? Sha256, string? ShaUrl);
+
     /// <summary>新しいバージョンの情報（GitHub Releases の最新リリース）</summary>
-    public sealed record UpdateInfo(Version Version, string Tag, string Name, string Notes, string ZipUrl, string? ShaUrl, string PageUrl, long Size,
-                                    string? Sha256 = null);
+    public sealed record UpdateInfo(Version Version, string Tag, string Name, string Notes, string PageUrl,
+                                    ReleaseAsset Zip, ReleaseAsset? Setup);
 
     /// <summary>
     /// GitHub Releases から新しいバージョンを確認し、ダウンロード・検証して入れ替える。
-    ///  1. 最新リリースのタグ（例: v2.1.0）と今のバージョンを比べる
-    ///  2. FilesBackup*.zip をダウンロードし、同名の .sha256 があればハッシュを照合する
-    ///  3. アプリを終了し、別プロセス（PowerShell）でファイルを入れ替えて起動し直す
+    ///  1. 最新リリースのタグ（例: v2.3.0）と今のバージョンを比べる
+    ///  2. インストーラーで入れた場合は FilesBackup-Setup.exe、それ以外は FilesBackup.zip をダウンロードし、
+    ///     SHA-256 を照合する（.sha256 ファイル、または GitHub が記録しているハッシュ）
+    ///  3. アプリを終了し、別プロセス（PowerShell）でインストーラーを無人実行するか、ファイルを入れ替えて起動し直す。
     ///     Program Files など書き込みに管理者権限が必要な場所なら、UAC の確認が出る
     /// </summary>
     public static class UpdateService
@@ -40,6 +44,10 @@ namespace FilesBackup.Services
 
         private static Version Normalize(Version v) => new(v.Major, v.Minor, Math.Max(0, v.Build));
 
+        /// <summary>インストーラーで入れたか（アンインストーラーが同じフォルダにある）</summary>
+        public static bool IsInstalledByInstaller(string installDir) =>
+            File.Exists(Path.Combine(installDir, "unins000.exe"));
+
         /// <summary>"v2.1.0" や "2.1" をバージョンとして読む（読めなければ null）</summary>
         public static Version? ParseTag(string? tag)
         {
@@ -61,50 +69,48 @@ namespace FilesBackup.Services
             var version = ParseTag(tag);
             if (version == null) return null;
 
-            string? zipUrl = null, shaUrl = null, zipName = null, digest = null;
-            long size = 0;
-            if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
+            var assets = new List<(string Name, string Url, long Size, string? Digest)>();
+            if (root.TryGetProperty("assets", out var list) && list.ValueKind == JsonValueKind.Array)
             {
-                foreach (var a in assets.EnumerateArray())
+                foreach (var a in list.EnumerateArray())
                 {
-                    string name = a.GetProperty("name").GetString() ?? "";
-                    if (zipUrl == null && name.StartsWith("FilesBackup", StringComparison.OrdinalIgnoreCase) &&
-                        name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                    {
-                        zipUrl = a.GetProperty("browser_download_url").GetString();
-                        zipName = name;
-                        size = a.TryGetProperty("size", out var s) ? s.GetInt64() : 0;
+                    string name = a.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    string url = a.TryGetProperty("browser_download_url", out var u) ? u.GetString() ?? "" : "";
+                    long size = a.TryGetProperty("size", out var s) && s.ValueKind == JsonValueKind.Number ? s.GetInt64() : 0;
 
-                        // GitHub が記録しているファイルのハッシュ（"sha256:..."）
-                        if (a.TryGetProperty("digest", out var dg) && dg.GetString() is string d &&
-                            d.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
-                            digest = ParseSha256(d[7..]);
-                    }
-                }
+                    // GitHub が記録しているファイルのハッシュ（"sha256:..."）
+                    string? digest = null;
+                    if (a.TryGetProperty("digest", out var dg) && dg.GetString() is string d &&
+                        d.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+                        digest = ParseSha256(d[7..]);
 
-                if (zipName != null)
-                {
-                    foreach (var a in assets.EnumerateArray())
-                    {
-                        string name = a.GetProperty("name").GetString() ?? "";
-                        if (name.Equals(zipName + ".sha256", StringComparison.OrdinalIgnoreCase))
-                            shaUrl = a.GetProperty("browser_download_url").GetString();
-                    }
+                    assets.Add((name, url, size, digest));
                 }
             }
 
-            if (zipUrl == null) return null;
+            ReleaseAsset? Find(Func<string, bool> match)
+            {
+                var hit = assets.FirstOrDefault(a => match(a.Name));
+                if (hit.Name == null) return null;
+                string? shaUrl = assets.FirstOrDefault(a => a.Name.Equals(hit.Name + ".sha256", StringComparison.OrdinalIgnoreCase)).Url;
+                return new ReleaseAsset(hit.Name, hit.Url, hit.Size, hit.Digest, shaUrl);
+            }
+
+            var zip = Find(n => n.StartsWith("FilesBackup", StringComparison.OrdinalIgnoreCase) &&
+                                n.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
+            if (zip == null) return null;
+
+            var setup = Find(n => n.StartsWith("FilesBackup-Setup", StringComparison.OrdinalIgnoreCase) &&
+                                  n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
 
             return new UpdateInfo(
                 version,
                 tag,
-                root.TryGetProperty("name", out var n) ? n.GetString() ?? tag : tag,
+                root.TryGetProperty("name", out var nm) ? nm.GetString() ?? tag : tag,
                 root.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "",
-                zipUrl,
-                shaUrl,
                 root.TryGetProperty("html_url", out var h) ? h.GetString() ?? "" : "",
-                size,
-                digest);
+                zip,
+                setup);
         }
 
         /// <summary>新しいバージョンがあれば返す（無ければ null）</summary>
@@ -132,23 +138,27 @@ namespace FilesBackup.Services
             return m.Success ? m.Value.ToLowerInvariant() : null;
         }
 
-        /// <summary>更新ファイルをダウンロードして検証する。保存先の zip のパスを返す</summary>
-        public static async Task<string> DownloadAsync(UpdateInfo info, IProgress<double>? progress, CancellationToken ct = default)
+        /// <summary>
+        /// 更新ファイルをダウンロードして検証する。保存先のパスを返す。
+        /// インストーラーで入れていて、リリースにインストーラーがあればインストーラー（.exe）、それ以外は zip。
+        /// </summary>
+        public static async Task<string> DownloadAsync(UpdateInfo info, string installDir, IProgress<double>? progress, CancellationToken ct = default)
         {
-            if (!IsTrustedUrl(info.ZipUrl))
+            var asset = IsInstalledByInstaller(installDir) && info.Setup != null ? info.Setup : info.Zip;
+            if (!IsTrustedUrl(asset.Url))
                 throw new InvalidDataException("更新ファイルの取得先が GitHub ではありません。");
 
             string dir = Path.Combine(Path.GetTempPath(), "FilesBackupUpdate");
             if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
             Directory.CreateDirectory(dir);
-            string zip = Path.Combine(dir, $"FilesBackup_{info.Version}.zip");
+            string path = Path.Combine(dir, asset.Name);
 
-            using (var response = await Http.Value.GetAsync(info.ZipUrl, HttpCompletionOption.ResponseHeadersRead, ct))
+            using (var response = await Http.Value.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, ct))
             {
                 response.EnsureSuccessStatusCode();
-                long total = response.Content.Headers.ContentLength ?? info.Size;
+                long total = response.Content.Headers.ContentLength ?? asset.Size;
                 await using var input = await response.Content.ReadAsStreamAsync(ct);
-                await using var output = File.Create(zip);
+                await using var output = File.Create(path);
                 var buffer = new byte[81920];
                 long done = 0;
                 int read;
@@ -160,33 +170,32 @@ namespace FilesBackup.Services
                 }
             }
 
-            // ハッシュの照合（.sha256 ファイル、無ければ GitHub が記録しているハッシュ）
-            string? expected = info.Sha256;
-            if (info.ShaUrl != null)
+            // ハッシュの照合（.sha256 ファイル、無ければ GitHub が記録しているハッシュ）。どちらも無いものは使わない
+            string? expected = asset.Sha256;
+            if (asset.ShaUrl != null)
             {
-                if (!IsTrustedUrl(info.ShaUrl))
+                if (!IsTrustedUrl(asset.ShaUrl))
                     throw new InvalidDataException("ハッシュファイルの取得先が GitHub ではありません。");
-                expected = ParseSha256(await Http.Value.GetStringAsync(info.ShaUrl, ct))
+                expected = ParseSha256(await Http.Value.GetStringAsync(asset.ShaUrl, ct))
                            ?? throw new InvalidDataException("ハッシュファイルを読み取れませんでした。");
             }
+            if (expected == null)
+                throw new InvalidDataException("更新ファイルのハッシュが公開されていないため、安全を確認できません。");
 
-            if (expected != null)
+            string actual;
+            await using (var fs = File.OpenRead(path))
+                actual = Convert.ToHexString(await SHA256.HashDataAsync(fs, ct)).ToLowerInvariant();
+            if (actual != expected)
+                throw new InvalidDataException("ダウンロードしたファイルが壊れています（ハッシュが一致しません）。");
+
+            if (path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             {
-                string actual;
-                await using (var fs = File.OpenRead(zip))
-                    actual = Convert.ToHexString(await SHA256.HashDataAsync(fs, ct)).ToLowerInvariant();
-
-                if (actual != expected)
-                    throw new InvalidDataException("ダウンロードしたファイルが壊れています（ハッシュが一致しません）。");
-            }
-
-            using (var archive = ZipFile.OpenRead(zip))
-            {
+                using var archive = ZipFile.OpenRead(path);
                 if (!archive.Entries.Any(e => e.Name.Equals("FilesBackup.exe", StringComparison.OrdinalIgnoreCase)))
                     throw new InvalidDataException("更新ファイルに FilesBackup.exe が含まれていません。");
             }
 
-            return zip;
+            return path;
         }
 
         /// <summary>インストール先に書き込めないなら、入れ替えに管理者権限が必要</summary>
@@ -205,31 +214,36 @@ namespace FilesBackup.Services
         }
 
         /// <summary>
-        /// ファイルを入れ替えるスクリプトを起動する。呼び出し側はこの後すぐアプリを終了すること。
+        /// 入れ替えのスクリプトを起動する（package は zip またはインストーラー）。呼び出し側はこの後すぐアプリを終了すること。
         /// UAC で「いいえ」が選ばれた場合は Win32Exception（NativeErrorCode 1223）になる。
         /// </summary>
-        public static void LaunchInstaller(string zip, string installDir)
+        public static void LaunchInstaller(string package, string installDir)
         {
             installDir = installDir.TrimEnd('\\', '/');
-            string dir = Path.GetDirectoryName(zip)!;
+            string dir = Path.GetDirectoryName(package)!;
             string script = Path.Combine(dir, "install_update.ps1");
             File.WriteAllText(script, InstallerScript, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
             string backup = Path.Combine(AppPaths.InstallBackupDir, $"v{CurrentVersion}_{DateTime.Now:yyyyMMdd_HHmmss}");
-            int pid = Environment.ProcessId;
+            bool elevate = NeedsElevation(installDir);
+            bool isSetup = package.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
+
+            string packageArg = isSetup
+                ? $"-SetupExe \"{package}\"" + (elevate ? "" : " -PerUser")   // 書き込めるなら「自分だけ」のインストール
+                : $"-Zip \"{package}\"";
 
             var psi = new ProcessStartInfo("powershell.exe")
             {
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\" " +
-                            $"-Zip \"{zip}\" -InstallDir \"{installDir}\" -ProcessId {pid} " +
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\" {packageArg} " +
+                            $"-InstallDir \"{installDir}\" -ProcessId {Environment.ProcessId} " +
                             $"-BackupDir \"{backup}\" -ResultPath \"{AppPaths.UpdateResultPath}\"",
             };
-            if (NeedsElevation(installDir))
+            if (elevate)
                 psi.Verb = "runas";
 
-            Logger.Info($"アップデートを開始します: {CurrentVersion} → {Path.GetFileName(zip)}（{installDir}）");
+            Logger.Info($"アップデートを開始します: {CurrentVersion} → {Path.GetFileName(package)}（{installDir}）");
             Process.Start(psi);
         }
 
@@ -252,7 +266,9 @@ namespace FilesBackup.Services
         // 入れ替え用スクリプト（Windows PowerShell 5.1 でも動くよう、文字列は英語のみ）
         public const string InstallerScript = """
             param(
-                [string]$Zip,
+                [string]$Zip = '',
+                [string]$SetupExe = '',
+                [switch]$PerUser,
                 [string]$InstallDir,
                 [int]$ProcessId,
                 [string]$BackupDir,
@@ -278,28 +294,37 @@ namespace FilesBackup.Services
                     Start-Sleep -Seconds 5
                 }
 
-                $staging = Join-Path (Split-Path -Parent $Zip) 'staging'
-                if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
-                # Expand-Archive fails on some Windows PowerShell 5.1 setups, so use .NET directly.
-                Add-Type -AssemblyName System.IO.Compression.FileSystem
-                [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $staging)
-
-                $exe = Get-ChildItem -Path $staging -Recurse -Filter 'FilesBackup.exe' | Select-Object -First 1
-                if (-not $exe) { throw 'FilesBackup.exe was not found in the update package.' }
-                $source = $exe.DirectoryName
-
                 # Keep the current version so it can be restored.
                 New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
                 Get-ChildItem -Path $InstallDir | Where-Object { $_.Name -ne 'Config' } |
                     Copy-Item -Destination $BackupDir -Recurse -Force
 
-                try {
-                    Get-ChildItem -Path $source | Where-Object { $_.Name -ne 'Config' } |
-                        Copy-Item -Destination $InstallDir -Recurse -Force
+                if ($SetupExe) {
+                    # Run the new installer silently into the same folder.
+                    $setupArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS', ('/DIR="' + $InstallDir + '"'))
+                    if ($PerUser) { $setupArgs += '/CURRENTUSER' } else { $setupArgs += '/ALLUSERS' }
+                    $p = Start-Process -FilePath $SetupExe -ArgumentList $setupArgs -Wait -PassThru
+                    if ($p.ExitCode -ne 0) { throw ('The installer failed with exit code ' + $p.ExitCode + '.') }
                 }
-                catch {
-                    Get-ChildItem -Path $BackupDir | Copy-Item -Destination $InstallDir -Recurse -Force
-                    throw ('Copy failed and the previous version was restored: ' + $_.Exception.Message)
+                else {
+                    $staging = Join-Path (Split-Path -Parent $Zip) 'staging'
+                    if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
+                    # Expand-Archive fails on some Windows PowerShell 5.1 setups, so use .NET directly.
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $staging)
+
+                    $exe = Get-ChildItem -Path $staging -Recurse -Filter 'FilesBackup.exe' | Select-Object -First 1
+                    if (-not $exe) { throw 'FilesBackup.exe was not found in the update package.' }
+                    $source = $exe.DirectoryName
+
+                    try {
+                        Get-ChildItem -Path $source | Where-Object { $_.Name -ne 'Config' } |
+                            Copy-Item -Destination $InstallDir -Recurse -Force
+                    }
+                    catch {
+                        Get-ChildItem -Path $BackupDir | Copy-Item -Destination $InstallDir -Recurse -Force
+                        throw ('Copy failed and the previous version was restored: ' + $_.Exception.Message)
+                    }
                 }
 
                 $version = (Get-Item (Join-Path $InstallDir 'FilesBackup.exe')).VersionInfo.FileVersion

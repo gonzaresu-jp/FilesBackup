@@ -12,7 +12,7 @@
     <Title>FilesBackup</Title>
     <BaseOutputPath>bin\Release\</BaseOutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.2.0</Version>
+    <Version>2.3.0</Version>
     <!-- 常駐アプリなので、待機中のメモリを小さくする（バックグラウンド GC を使わず、GC はメモリ節約を優先） -->
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <ServerGarbageCollection>false</ServerGarbageCollection>

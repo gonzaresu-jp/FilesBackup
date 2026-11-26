@@ -17,6 +17,17 @@ namespace FilesBackup.Services
             return key?.GetValue(ValueName) as string;
         }
 
+        /// <summary>この exe を起動する登録だけを消す（別の場所に入れた FilesBackup の登録は残す）</summary>
+        public static void RemoveIfOwnedBy(string exePath)
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true);
+            if (key?.GetValue(ValueName) is string command &&
+                command.Contains(exePath, StringComparison.OrdinalIgnoreCase))
+            {
+                key.DeleteValue(ValueName, throwOnMissingValue: false);
+            }
+        }
+
         /// <summary>設定に合わせて登録・解除する（同じ内容なら何もしない）</summary>
         public static void Apply(bool enabled, string exePath)
         {

@@ -162,19 +162,30 @@ Windows のタスク スケジューラに登録して、毎日・毎週・起�
 
 ## 📦 インストール方法
 
-1. [Releases ページ](https://github.com/gonzaresu-jp/FilesBackup/releases/tag/Backup) から **Latest** バージョンを開く
-2. `FilesBackup.zip` をダウンロード
-3. 任意の場所に解凍して、フォルダ内の `.exe` を実行
+1. [Releases ページ](https://github.com/gonzaresu-jp/FilesBackup/releases/latest) から最新版を開く
+2. `FilesBackup-Setup.exe` をダウンロードして実行
+3. 最初の画面でインストール先を選ぶ
+   - **すべてのユーザー**（既定）：`C:\Program Files\FilesBackup` に入れます。管理者権限が必要で、アップデートのたびに UAC の確認が出ます。
+   - **自分だけ**：`%LocalAppData%\Programs\FilesBackup` に入れます。管理者権限は不要で、アップデートも確認なしで進みます。
 
-[.NET 8 デスクトップ ランタイム](https://dotnet.microsoft.com/download/dotnet/8.0) が必要です。
-通常は管理者権限なしで動きます。管理者権限が必要なフォルダをバックアップする場合は「設定」→「管理者として再起動」を使ってください。
+[.NET 8 デスクトップ ランタイム](https://dotnet.microsoft.com/download/dotnet/8.0) が必要です（入っていなければインストーラーが案内します）。
+インストール後のアップデートは、アプリが自動で行います。
+
+> インストーラーには署名していないため、ダウンロードして実行すると「Windows によって PC が保護されました」と表示されることがあります。
+> その場合は「詳細情報」→「実行」で進めてください。アプリの自動アップデートでは表示されません。
+
+インストーラーを使わない場合は、`FilesBackup.zip` を任意の場所に解凍して `FilesBackup.exe` を実行しても使えます（この場合のアップデートは、フォルダ内のファイルを入れ替えます）。
+
+アプリは通常、管理者権限なしで動きます。管理者権限が必要なフォルダをバックアップする場合は「設定」→「実行権限」から管理者として再起動してください。
 
 ## ❌ アンインストール方法
 
-1. 「設定」→「一般」で「サインイン時に起動」をオフにし、トレイのメニューから終了
-2. インストールしたフォルダを削除
-3. Windows タスク スケジューラ内の **FilesBackupAutoTask** を削除
-4. 設定・ログ・履歴も消す場合は `%LocalAppData%\FilesBackup` を削除
+Windows の「設定」→「アプリ」→「インストールされているアプリ」から **FilesBackup** をアンインストールします。
+サインイン時の自動起動とタスク スケジューラのタスク（**FilesBackupAutoTask**）も一緒に削除します。
+設定・ログ・履歴は残すので、不要なら `%LocalAppData%\FilesBackup` を削除してください。
+
+zip から使っていた場合は、「設定」→「一般」で「サインイン時に起動」をオフにしてトレイから終了し、
+フォルダとタスク スケジューラの **FilesBackupAutoTask** を削除してください。
 
 ## 🛠️ ビルドと動作確認
 
@@ -201,8 +212,9 @@ README の画面写真は、サンプルの設定を入れたフォルダを `FI
 ## 🚀 リリースの公開（自動アップデートの配信）
 
 `FilesBackup.csproj` の `Version` を上げてコミットし、同じ番号のタグを push すると、
-GitHub Actions（`.github/workflows/release.yml`）がテスト・ビルドを行い、
-`FilesBackup.zip` と `FilesBackup.zip.sha256` を GitHub Releases に公開します。
+GitHub Actions（`.github/workflows/release.yml`）がテスト・ビルド・インストーラーの作成を行い、
+`FilesBackup-Setup.exe`・`FilesBackup.zip` と、それぞれの `.sha256` を GitHub Releases に公開します。
+インストーラーは Inno Setup（`installer/FilesBackup.iss`）で作ります。
 インストール済みのアプリは、このリリースを見つけて自動アップデートします。
 
 ```powershell

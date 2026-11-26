@@ -22,6 +22,15 @@ namespace FilesBackup
         {
             string[] args = Environment.GetCommandLineArgs();
 
+            // アンインストーラーから呼ばれる後片付け（自動起動の登録とスケジュールのタスクを消す。設定・履歴は残す）
+            if (args.Length > 1 && args[1].Equals(UninstallArg, StringComparison.OrdinalIgnoreCase))
+            {
+                string self = Environment.ProcessPath ?? Application.ExecutablePath;
+                try { StartupRegistration.RemoveIfOwnedBy(self); } catch { }
+                try { SchedulerService.UnregisterIfOwnedBy(self); } catch { }
+                return 0;
+            }
+
             // 旧バージョンの保存先（exe と同じフォルダの Config）から設定を移行する
             AppPaths.MigrateLegacyConfig();
 
@@ -87,6 +96,9 @@ namespace FilesBackup
 
         /// <summary>exe 用のアイコンファイルを書き出して終了する（--make-icon 保存先.ico）</summary>
         private const string MakeIconArg = "--make-icon";
+
+        /// <summary>アンインストーラーから呼ばれる後片付け</summary>
+        private const string UninstallArg = "--uninstall";
 
         private static volatile Form1? _mainForm;
 

@@ -565,14 +565,24 @@ internal static class Program
                 { "name": "FilesBackup.zip", "size": 1234, "digest": "sha256:SHA",
                   "browser_download_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/download/v9.9.9/FilesBackup.zip" },
                 { "name": "FilesBackup.zip.sha256", "size": 80,
-                  "browser_download_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/download/v9.9.9/FilesBackup.zip.sha256" }
+                  "browser_download_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/download/v9.9.9/FilesBackup.zip.sha256" },
+                { "name": "FilesBackup-Setup.exe", "size": 5678, "digest": "sha256:SHA",
+                  "browser_download_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/download/v9.9.9/FilesBackup-Setup.exe" }
               ]
             }
             """.Replace("SHA", sha);
         var info = UpdateService.ParseRelease(json);
-        Check(info != null && info.Version == new Version(9, 9, 9) && info.ZipUrl.EndsWith("FilesBackup.zip")
-              && info.ShaUrl!.EndsWith(".sha256") && info.Sha256 == sha && info.Size == 1234,
+        Check(info != null && info.Version == new Version(9, 9, 9) && info.Zip.Url.EndsWith("FilesBackup.zip")
+              && info.Zip.ShaUrl!.EndsWith(".sha256") && info.Zip.Sha256 == sha && info.Zip.Size == 1234,
             "zip・ハッシュ・サイズを読み取る");
+        Check(info!.Setup != null && info.Setup.Name == "FilesBackup-Setup.exe" && info.Setup.Sha256 == sha && info.Setup.ShaUrl == null,
+            "インストーラーも読み取る（zip のハッシュファイルと取り違えない）");
+        Check(UpdateService.ParseRelease(json.Replace("FilesBackup-Setup.exe\"", "Other.exe\""))!.Setup == null, "インストーラーが無いリリースも扱える");
+
+        string fakeInstall = D("t31install");
+        Check(!UpdateService.IsInstalledByInstaller(fakeInstall), "アンインストーラーが無ければ zip で更新");
+        F(Path.Combine(fakeInstall, "unins000.exe"));
+        Check(UpdateService.IsInstalledByInstaller(fakeInstall), "インストーラーで入れたならインストーラーで更新");
 
         Check(UpdateService.ParseRelease(json.Replace("\"prerelease\": false", "\"prerelease\": true")) == null, "プレリリースは対象外");
         Check(UpdateService.ParseRelease(json.Replace("FilesBackup.zip\"", "Other.zip\"")) == null, "FilesBackup の zip が無ければ対象外");

@@ -63,6 +63,21 @@ namespace FilesBackup.Services
             ts.RootFolder.RegisterTaskDefinition(TaskName, td);
         }
 
+        /// <summary>
+        /// この exe を実行するタスクだけを削除する（アンインストール時）。
+        /// 別の場所に入れた FilesBackup のタスクは残す。
+        /// </summary>
+        public static void UnregisterIfOwnedBy(string exePath)
+        {
+            using var ts = new TaskService();
+            var task = ts.FindTask(TaskName);
+            if (task == null) return;
+
+            string? path = task.Definition.Actions.OfType<ExecAction>().FirstOrDefault()?.Path;
+            if (path != null && string.Equals(Path.GetFullPath(path.Trim('"')), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase))
+                ts.RootFolder.DeleteTask(TaskName, exceptionOnNotExists: false);
+        }
+
         public record TaskStatusInfo(bool Exists, DateTime? NextRun, DateTime? LastRun, string RunLevel, string ExecutablePath, string? Error = null);
 
         public static TaskStatusInfo GetStatus()
