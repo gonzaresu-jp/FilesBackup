@@ -30,6 +30,22 @@ namespace FilesBackup
 
         // ---- 起動モード ----
         private readonly string? _screenshotDir;
+        private bool _allowVisible;                 // false の間はウィンドウを出さない（トレイ常駐で起動したとき）
+        private bool _trayHintShown;
+        private Action? _balloonAction;             // 通知をクリックしたときの動作
+        private readonly System.Windows.Forms.Timer _startupTimer = new() { Interval = 1500 };
+        private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 60 * 60 * 1000 };
+
+        // ---- アプリ設定・アップデート ----
+        private AppSettings _appSettings = new();
+        private UpdateInfo? _update;
+        private bool _updating;
+        private Card bannerUpdate = null!;
+        private ThemedLabel lblBannerUpdate = null!;
+        private ThemedLabel lblUpdateStatus = null!, lblUpdateNotes = null!;
+        private ModernButton btnInstallUpdate = null!, btnCheckUpdate = null!;
+        private ThinProgress updateProgress = null!;
+        private ToggleSwitch tglAutoUpdate = null!, tglStartup = null!;
 
         // ---- 骨組み ----
         private NavRail rail = null!;
@@ -104,9 +120,12 @@ namespace FilesBackup
         // ---- 設定 ----
         private ToggleSwitch tglDark = null!, tglMachine = null!;
 
-        public Form1(string? screenshotDir = null)
+        public Form1(string? screenshotDir = null, bool startInTray = false)
         {
             _screenshotDir = screenshotDir;
+            _allowVisible = !startInTray;
+            _trayHintShown = startInTray;
+            _appSettings = ConfigStore.LoadAppSettings();
 
             Theme.DetectSystem();
             Text = "FilesBackup";
@@ -122,6 +141,22 @@ namespace FilesBackup
             BuildUi();
 
             Shown += Form1_Shown;
+
+            if (_screenshotDir == null)
+            {
+                // ウィンドウを出さずに起動しても動くよう、起動後の処理はタイマーで行う
+                if (!_allowVisible) CreateHandle();
+                _startupTimer.Tick += StartupTimer_Tick;
+                _startupTimer.Start();
+                _updateTimer.Tick += async (s, e) => await CheckForUpdatesAsync(manual: false);
+                _updateTimer.Start();
+            }
+        }
+
+        // トレイ常駐で起動したときは、ShowWindow が呼ばれるまでウィンドウを出さない
+        protected override void SetVisibleCore(bool value)
+        {
+            base.SetVisibleCore(_allowVisible && value);
         }
 
         private int S(int v) => (int)Math.Round(v * DeviceDpi / 96f);
@@ -229,12 +264,14 @@ namespace FilesBackup
             AddView("settings:storage", BuildSettingsStorage());
             AddView("settings:transfer", BuildSettingsTransfer());
             AddView("settings:privilege", BuildSettingsPrivilege());
+            AddView("settings:update", BuildSettingsUpdate());
             AddView("settings:about", BuildSettingsAbout());
 
             ResumeLayout(true);
             ApplyDwmDarkMode();
 
             UpdateTiles();
+            UpdateUpdateUi();
             SetRunningUi(_backupRunning, _runningDryRun);
             Navigate(_page, _sideKey);
         }
@@ -542,7 +579,9 @@ namespace FilesBackup
                 case "settings":
                     side.SetEntries("設定", new[]
                     {
-                        SideEntry.Item("general", Glyph.Brush, "表示"),
+                        SideEntry.Item("general", Glyph.Brush, "一般"),
+                        SideEntry.Item("update", Glyph.Download, "アップデート", _update != null ? "新しい版" : "",
+                            countColor: _update != null ? Theme.Accent : null),
                         SideEntry.Item("storage", Glyph.Storage, "保存先", AppPaths.IsMachineMode ? "共通" : ""),
                         SideEntry.Item("transfer", Glyph.Export, "インポート/エクスポート"),
                         SideEntry.Item("privilege", Glyph.Shield, "実行権限", IsElevated ? "管理者" : ""),
@@ -634,6 +673,23 @@ namespace FilesBackup
             bannerUnsaved.Add(bannerRow);
             bannerUnsaved.Visible = _tasksDirty;
             page.Controls.Add(bannerUnsaved);
+
+            // アップデートのお知らせ
+            bannerUpdate = new Card { FillColor = Theme.AccentSoft, BorderColor = Theme.AccentSoft };
+            bannerUpdate.Body.BackColor = Theme.AccentSoft;
+            var updateRow = new RowPanel { Height = S(38), BackColor = Theme.AccentSoft };
+            lblBannerUpdate = Label("", height: 24);
+            updateRow.AddFill(lblBannerUpdate);
+            updateRow.AddRight(Btn("あとで", click: (s, e) =>
+            {
+                if (_update != null) _appSettings.SkippedVersion = _update.Version.ToString();
+                TrySaveAppSettings();
+                bannerUpdate.Visible = false;
+            }));
+            updateRow.AddRight(Btn("更新する", Glyph.Download, ButtonKind.Primary, async (s, e) => await InstallUpdateAsync()));
+            bannerUpdate.Add(updateRow);
+            bannerUpdate.Visible = false;
+            page.Controls.Add(bannerUpdate);
 
             // 実行
             var run = new Card("実行", "「事前チェック」と「プレビュー」で、実行前に内容を確認できます");
@@ -2035,7 +2091,23 @@ namespace FilesBackup
         private Control BuildSettingsGeneral()
         {
             var page = NewPage();
-            page.Controls.Add(new PageHeader("表示", "見た目の設定です"));
+            page.Controls.Add(new PageHeader("一般", "起動と見た目の設定です"));
+
+            var startup = new Card("起動と常駐");
+            tglStartup = Toggle("Windows のサインイン時に起動して、タスクトレイに常駐する",
+                "ウィンドウは出さずにトレイで待機します。アイコンをクリックすると開きます");
+            tglStartup.Checked = _appSettings.StartWithWindows;
+            tglStartup.CheckedChanged += (s, e) =>
+            {
+                _appSettings.StartWithWindows = tglStartup.Checked;
+                TrySaveAppSettings();
+                try { StartupRegistration.Apply(_appSettings.StartWithWindows, Application.ExecutablePath); }
+                catch (Exception ex) { ShowError("自動起動の設定に失敗しました", ex); }
+            };
+            startup.Add(tglStartup,
+                Label("ウィンドウを閉じたり最小化したりしても、終了せずにタスクトレイに常駐します（終了はトレイのメニューから）",
+                    ThemedLabel.Style.Small, 20));
+            page.Controls.Add(startup);
 
             var card = new Card("テーマ");
             tglDark = Toggle("ダークモード", "左下のボタンでも切り替えられます（起動時は Windows の設定に合わせます）");
@@ -2043,6 +2115,35 @@ namespace FilesBackup
             tglDark.CheckedChanged += (s, e) => { if (tglDark.Checked != Theme.IsDark) BeginInvoke(ToggleTheme); };
             card.Add(tglDark);
             page.Controls.Add(card);
+            return page;
+        }
+
+        private Control BuildSettingsUpdate()
+        {
+            var page = NewPage();
+            page.Controls.Add(new PageHeader("アップデート", $"今のバージョン: {UpdateService.CurrentVersion}"));
+
+            var card = new Card("新しいバージョン", "GitHub で公開されている最新版を確認します");
+            lblUpdateStatus = Label("", height: 24);
+            lblUpdateNotes = Label("", ThemedLabel.Style.Small, 110);
+            lblUpdateNotes.Visible = false;
+            updateProgress = new ThinProgress { Height = S(6), Visible = false };
+            btnCheckUpdate = Btn("更新を確認", Glyph.Refresh, click: async (s, e) => await CheckForUpdatesAsync(manual: true));
+            btnInstallUpdate = Btn("更新する", Glyph.Download, ButtonKind.Primary, async (s, e) => await InstallUpdateAsync());
+            btnInstallUpdate.Visible = false;
+            var row = new RowPanel { Height = S(40), BackColor = Theme.Card };
+            row.AddLeft(btnCheckUpdate).AddRight(btnInstallUpdate);
+            card.Add(lblUpdateStatus, updateProgress, lblUpdateNotes, row);
+            page.Controls.Add(card);
+
+            var auto = new Card("自動で確認");
+            tglAutoUpdate = Toggle("新しいバージョンを自動で確認する（1日1回）",
+                "見つかったらトレイの通知でお知らせします。「更新する」を押すと、ダウンロードからインストールまで自動で行います");
+            tglAutoUpdate.Checked = _appSettings.AutoCheckUpdates;
+            tglAutoUpdate.CheckedChanged += (s, e) => { _appSettings.AutoCheckUpdates = tglAutoUpdate.Checked; TrySaveAppSettings(); };
+            auto.Add(tglAutoUpdate,
+                Label("更新前のバージョンは %LocalAppData%\\FilesBackup\\InstallBackup に保存します", ThemedLabel.Style.Small, 20));
+            page.Controls.Add(auto);
             return page;
         }
 
@@ -2318,22 +2419,20 @@ namespace FilesBackup
 
         private void InitializeTrayIcon()
         {
-            var menu = new ContextMenuStrip();
+            var menu = new ContextMenuStrip { Font = Theme.Body };
             menu.Items.Add("開く", null, (s, e) => ShowWindow());
+            menu.Items.Add("今すぐバックアップ", null, async (s, e) =>
+            {
+                ShowWindow();
+                Navigate("backup", "overview");
+                await RunBackupAsync(dryRun: false);
+            });
             trayCancelItem = new ToolStripMenuItem("バックアップを中止", null, (s, e) => { _currentManager?.Resume(); _cts?.Cancel(); }) { Enabled = false };
             menu.Items.Add(trayCancelItem);
-            menu.Items.Add("終了", null, (s, e) =>
-            {
-                if (_backupRunning)
-                {
-                    ShowWindow();
-                    MessageBox.Show("バックアップ実行中です。中止してから終了してください。", "確認", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                trayIcon.Visible = false;
-                trayIcon.Dispose();
-                Environment.Exit(0);
-            });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("更新を確認", null, async (s, e) => await CheckForUpdatesAsync(manual: true));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("終了", null, (s, e) => ExitApp());
 
             trayIcon = new NotifyIcon
             {
@@ -2342,22 +2441,68 @@ namespace FilesBackup
                 Text = "FilesBackup",
                 Visible = _screenshotDir == null,
             };
-            trayIcon.DoubleClick += (s, e) => ShowWindow();
+            trayIcon.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowWindow(); };
+            trayIcon.BalloonTipClicked += (s, e) =>
+            {
+                var action = _balloonAction;
+                _balloonAction = null;
+                (action ?? ShowWindow)();
+            };
+            trayIcon.BalloonTipClosed += (s, e) => _balloonAction = null;
+        }
+
+        private void ShowBalloon(string title, string text, ToolTipIcon icon, Action? onClick = null)
+        {
+            if (_screenshotDir != null) return;
+            _balloonAction = onClick;
+            trayIcon.ShowBalloonTip(8000, title, text, icon);
         }
 
         public void ShowWindow()
         {
+            _allowVisible = true;
             Show();
-            WindowState = FormWindowState.Normal;
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
             BringToFront();
             Activate();
+        }
+
+        // トレイに隠す（初回だけ、トレイで動いていることを知らせる）
+        private void HideToTray()
+        {
+            Hide();
+            if (!_trayHintShown)
+            {
+                _trayHintShown = true;
+                ShowBalloon("FilesBackup", "タスクトレイで動いています。アイコンをクリックすると開きます。", ToolTipIcon.Info);
+            }
+        }
+
+        private void ExitApp()
+        {
+            if (_backupRunning)
+            {
+                ShowWindow();
+                MessageBox.Show("バックアップ実行中です。中止してから終了してください。", "確認", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if ((_tasksDirty || _ignoreDirty || _scheduleDirty) &&
+                MessageBox.Show("保存されていない変更があります。保存せずに終了しますか？", "確認",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                ShowWindow();
+                return;
+            }
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
+            Environment.Exit(0);
         }
 
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
             if (WindowState == FormWindowState.Minimized && _screenshotDir == null)
-                Hide();
+                HideToTray();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -2382,19 +2527,44 @@ namespace FilesBackup
             }
 
             // ウィンドウを閉じてもトレイに常駐する
-            Hide();
             e.Cancel = true;
+            HideToTray();
         }
 
         private async void Form1_Shown(object? sender, EventArgs e)
         {
             if (_screenshotDir != null)
-            {
                 await CaptureScreenshotsAsync(_screenshotDir);
-                return;
+        }
+
+        // 起動直後に1回だけ行う処理（ウィンドウを出していなくても動く）
+        private async void StartupTimer_Tick(object? sender, EventArgs e)
+        {
+            _startupTimer.Stop();
+
+            // サインイン時の自動起動を設定に合わせる
+            try { StartupRegistration.Apply(_appSettings.StartWithWindows, Application.ExecutablePath); }
+            catch (Exception ex) { Logger.Error("自動起動の登録に失敗しました", ex); }
+
+            // アップデートの結果を知らせる
+            string? updateResult = UpdateService.TakeResult();
+            if (updateResult != null)
+            {
+                if (updateResult.StartsWith("OK"))
+                    ShowBalloon("アップデートしました", $"FilesBackup {UpdateService.CurrentVersion} に更新しました。", ToolTipIcon.Info);
+                else
+                    ShowBalloon("アップデートに失敗しました", updateResult.Replace("ERROR ", ""), ToolTipIcon.Warning);
             }
 
-            // 予定の実行が行われていなければ知らせる（PC の電源が切れていた等）
+            await CheckMissedRunAsync();
+
+            if (_appSettings.AutoCheckUpdates)
+                await CheckForUpdatesAsync(manual: false);
+        }
+
+        // 予定の実行が行われていなければ知らせる（PC の電源が切れていた等）
+        private async Task CheckMissedRunAsync()
+        {
             try
             {
                 var cfg = ConfigStore.LoadSchedule();
@@ -2403,6 +2573,22 @@ namespace FilesBackup
                 DateTime savedAt = File.GetLastWriteTime(AppPaths.ScheduleConfigPath);
                 var missed = SchedulerService.FindMissedRun(cfg, _history, DateTime.Now, savedAt);
                 if (missed == null || RunLock.IsBackupRunning()) return;
+
+                async void RunNow()
+                {
+                    ShowWindow();
+                    Navigate("backup", "overview");
+                    await RunBackupAsync(dryRun: false);
+                }
+
+                if (!Visible)
+                {
+                    // トレイ常駐中は通知で知らせ、クリックされたら実行する
+                    ShowBalloon("予定のバックアップが実行されていません",
+                        $"{missed:MM/dd HH:mm} の予定が実行されていません。クリックすると今すぐ実行します。",
+                        ToolTipIcon.Warning, RunNow);
+                    return;
+                }
 
                 if (MessageBox.Show($"{missed:yyyy/MM/dd HH:mm} に予定されていたバックアップが実行されていません。\n今すぐ実行しますか？",
                         "予定のバックアップ", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
@@ -2415,6 +2601,172 @@ namespace FilesBackup
             {
                 Logger.Error("予定実行の確認に失敗しました", ex);
             }
+        }
+
+        // ================================================================
+        // アップデート
+        // ================================================================
+
+        private async Task CheckForUpdatesAsync(bool manual)
+        {
+            if (_updating) return;
+            if (!manual)
+            {
+                // 自動確認は1日1回まで
+                if (!_appSettings.AutoCheckUpdates) return;
+                if (_appSettings.LastUpdateCheck is DateTime last && DateTime.Now - last < TimeSpan.FromHours(23)) return;
+            }
+
+            SetUpdateStatus("更新を確認しています...");
+            try
+            {
+                _update = await UpdateService.CheckAsync();
+                _appSettings.LastUpdateCheck = DateTime.Now;
+                TrySaveAppSettings();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"更新の確認に失敗しました: {ex.Message}");
+                SetUpdateStatus($"更新を確認できませんでした（{ex.Message}）");
+                if (manual)
+                    MessageBox.Show($"更新を確認できませんでした。\n{ex.Message}", "アップデート", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            UpdateUpdateUi();
+
+            if (_update == null)
+            {
+                if (manual)
+                    MessageBox.Show($"最新のバージョン（{UpdateService.CurrentVersion}）を使っています。", "アップデート", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (manual)
+            {
+                ShowWindow();
+                Navigate("settings", "update");
+            }
+            else if (_update.Version.ToString() != _appSettings.SkippedVersion)
+            {
+                ShowBalloon("新しいバージョンがあります",
+                    $"FilesBackup {_update.Version} が公開されています。クリックすると更新できます。",
+                    ToolTipIcon.Info,
+                    () => { ShowWindow(); Navigate("settings", "update"); });
+            }
+        }
+
+        private void SetUpdateStatus(string text)
+        {
+            if (lblUpdateStatus != null && !lblUpdateStatus.IsDisposed) lblUpdateStatus.Text = text;
+        }
+
+        /// <summary>アップデートの有無に合わせて、概要のお知らせと設定ページを更新する</summary>
+        private void UpdateUpdateUi()
+        {
+            if (bannerUpdate == null || bannerUpdate.IsDisposed) return;
+
+            bool available = _update != null;
+            bannerUpdate.Visible = available && _update!.Version.ToString() != _appSettings.SkippedVersion;
+            if (available) lblBannerUpdate.Text = $"新しいバージョン {_update!.Version} が公開されています（今のバージョン: {UpdateService.CurrentVersion}）";
+
+            btnInstallUpdate.Visible = available;
+            btnInstallUpdate.Enabled = !_updating;
+            btnCheckUpdate.Enabled = !_updating;
+            btnInstallUpdate.Parent?.PerformLayout();
+
+            string last = _appSettings.LastUpdateCheck is DateTime d ? $"（最終確認: {d:MM/dd HH:mm}）" : "";
+            lblUpdateStatus.Text = available
+                ? $"新しいバージョン {_update!.Version} があります。「更新する」で、ダウンロードからインストールまで自動で行います。"
+                : $"最新のバージョンを使っています{last}";
+
+            lblUpdateNotes.Text = available ? ReleaseNotesSummary(_update!.Notes) : "";
+            lblUpdateNotes.Visible = available && lblUpdateNotes.Text.Length > 0;
+
+            if (_page == "settings") RefreshSide();
+        }
+
+        private static string ReleaseNotesSummary(string notes)
+        {
+            var lines = notes.Replace("\r\n", "\n").Split('\n')
+                .Select(l => l.Trim())
+                .Where(l => l.Length > 0)
+                .Take(6)
+                .ToList();
+            return string.Join("\n", lines);
+        }
+
+        private void TrySaveAppSettings()
+        {
+            try { ConfigStore.SaveAppSettings(_appSettings); }
+            catch (Exception ex) { Logger.Warn($"アプリ設定の保存に失敗しました: {ex.Message}"); }
+        }
+
+        private async Task InstallUpdateAsync()
+        {
+            if (_update == null || _updating) return;
+
+            if (_backupRunning || RunLock.IsBackupRunning())
+            {
+                MessageBox.Show("バックアップの実行中は更新できません。終わってからもう一度お試しください。", "アップデート", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if ((_tasksDirty || _ignoreDirty || _scheduleDirty) &&
+                MessageBox.Show("保存されていない変更があります。保存せずに更新しますか？", "確認",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            string installDir = AppContext.BaseDirectory;
+            string elevation = UpdateService.NeedsElevation(installDir)
+                ? "\n\nインストール先への書き込みに管理者権限が必要なため、確認の画面（UAC）が表示されます。"
+                : "";
+            if (MessageBox.Show(
+                    $"FilesBackup を {_update.Version} に更新します。\n\n" +
+                    "ダウンロードが終わるとアプリをいったん終了し、ファイルを入れ替えてから自動で起動し直します。" +
+                    "設定・履歴はそのまま引き継がれ、今のバージョンは控えとして保存します。" + elevation,
+                    "アップデート", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
+                return;
+
+            _updating = true;
+            UpdateUpdateUi();
+            updateProgress.Visible = true;
+            updateProgress.Value = 0;
+            SetUpdateStatus("ダウンロードしています...");
+
+            try
+            {
+                var progressReporter = new Progress<double>(p =>
+                {
+                    updateProgress.Value = (float)p;
+                    SetUpdateStatus($"ダウンロードしています... {p:P0}");
+                });
+                string zip = await UpdateService.DownloadAsync(_update, progressReporter);
+
+                SetUpdateStatus("インストールを開始します...");
+                UpdateService.LaunchInstaller(zip, installDir);
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+            {
+                _updating = false;
+                updateProgress.Visible = false;
+                SetUpdateStatus("管理者権限の確認がキャンセルされたため、更新しませんでした。");
+                UpdateUpdateUi();
+                return;
+            }
+            catch (Exception ex)
+            {
+                _updating = false;
+                updateProgress.Visible = false;
+                Logger.Error("アップデートに失敗しました", ex);
+                UpdateUpdateUi();
+                ShowError("アップデートに失敗しました", ex);
+                return;
+            }
+
+            // 入れ替えはスクリプトが行う。アプリは終了し、入れ替え後に自動で起動し直す
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
+            Environment.Exit(0);
         }
 
         // ---- README 用の画面写真（--screenshots <フォルダ>）----

@@ -12,7 +12,9 @@
     <Title>FilesBackup</Title>
     <BaseOutputPath>bin\Release\</BaseOutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
+    <!-- アイコンを作り直すときは、アプリを make-icon オプション付きで起動する（README 参照） -->
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <!-- 依存パッケージの多言語リソースは日本語だけ出力する -->
     <SatelliteResourceLanguages>ja</SatelliteResourceLanguages>
   </PropertyGroup>

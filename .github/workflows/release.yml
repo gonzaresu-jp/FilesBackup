@@ -1,0 +1,45 @@
+# タグ（例: v2.1.0）を push すると、テスト → ビルド → zip とハッシュの作成 → GitHub Releases への公開を行う。
+# アプリの自動アップデートは、ここで公開した FilesBackup.zip と FilesBackup.zip.sha256 を使う。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Test
+        run: dotnet run --project tests/EngineTests -c Release
+
+      - name: Publish
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          dotnet publish FilesBackup.csproj -c Release -o publish "-p:Version=$version"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish\* -DestinationPath FilesBackup.zip
+          $hash = (Get-FileHash FilesBackup.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  FilesBackup.zip" | Out-File FilesBackup.zip.sha256 -Encoding ascii
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: FilesBackup ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            FilesBackup.zip
+            FilesBackup.zip.sha256

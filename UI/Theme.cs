@@ -176,19 +176,71 @@ namespace FilesBackup.UI
             g.FillRectangle(brush, box.X + cell + gap, box.Y + cell + gap, cell, cell);
         }
 
-        /// <summary>ウィンドウ・トレイ用のアイコン（黒地に白いロゴ）</summary>
+        /// <summary>アイコンの絵（黒い角丸四角に白いロゴ）</summary>
+        private static Bitmap RenderAppIcon(int size)
+        {
+            var bmp = new Bitmap(size, size);
+            using var g = Graphics.FromImage(bmp);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            FillRound(g, Hex(0x141414), new RectangleF(0, 0, size - 1, size - 1), size * 0.22f);
+            float pad = size * 0.24f;
+            DrawLogo(g, new RectangleF(pad, pad, size - pad * 2, size - pad * 2), Color.White);
+            return bmp;
+        }
+
+        /// <summary>ウィンドウ・トレイ用のアイコン</summary>
         public static Icon CreateAppIcon(int size = 64)
         {
-            using var bmp = new Bitmap(size, size);
-            using (var g = Graphics.FromImage(bmp))
+            // exe に埋め込んだアイコンがあればそれを使う（無ければ描いて作る）
+            try
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Transparent);
-                FillRound(g, Hex(0x141414), new RectangleF(0, 0, size - 1, size - 1), size * 0.22f);
-                float pad = size * 0.24f;
-                DrawLogo(g, new RectangleF(pad, pad, size - pad * 2, size - pad * 2), Color.White);
+                var embedded = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (embedded != null && embedded.Width >= 32) return new Icon(embedded, size, size);
             }
+            catch { }
+
+            using var bmp = RenderAppIcon(size);
             return Icon.FromHandle(bmp.GetHicon());
+        }
+
+        /// <summary>
+        /// exe 用のアイコンファイル（.ico）を書き出す（各サイズを PNG で格納）。
+        /// 作り直すとき: FilesBackup.exe --make-icon Assets\app.ico
+        /// </summary>
+        public static void SaveIconFile(string path)
+        {
+            int[] sizes = { 16, 20, 24, 32, 40, 48, 64, 128, 256 };
+            var images = new List<byte[]>();
+            foreach (int s in sizes)
+            {
+                using var bmp = RenderAppIcon(s);
+                using var ms = new MemoryStream();
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                images.Add(ms.ToArray());
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+            using var fs = File.Create(path);
+            using var w = new BinaryWriter(fs);
+            w.Write((ushort)0);
+            w.Write((ushort)1);
+            w.Write((ushort)sizes.Length);
+            int offset = 6 + 16 * sizes.Length;
+            for (int i = 0; i < sizes.Length; i++)
+            {
+                byte dim = (byte)(sizes[i] >= 256 ? 0 : sizes[i]);
+                w.Write(dim);
+                w.Write(dim);
+                w.Write((byte)0);
+                w.Write((byte)0);
+                w.Write((ushort)1);
+                w.Write((ushort)32);
+                w.Write(images[i].Length);
+                w.Write(offset);
+                offset += images[i].Length;
+            }
+            foreach (var img in images) w.Write(img);
         }
     }
 
@@ -239,5 +291,7 @@ namespace FilesBackup.UI
         public const string Power = "";
         public const string Brush = "";
         public const string Storage = "";
+        public const string Download = "";
+        public const string Refresh = "";
     }
 }

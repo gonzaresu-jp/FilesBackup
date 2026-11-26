@@ -46,6 +46,15 @@ namespace FilesBackup.Services
         public static void SaveOptions(BackupOptions options) =>
             Write(AppPaths.OptionsConfigPath, options);
 
+        public static AppSettings LoadAppSettings()
+        {
+            try { return Read<AppSettings>(AppPaths.AppSettingsPath) ?? new(); }
+            catch { return new(); }
+        }
+
+        public static void SaveAppSettings(AppSettings settings) =>
+            Write(AppPaths.AppSettingsPath, settings);
+
         // ---- インポート/エクスポート ----
 
         public static SettingsBundle CreateBundle() => new()

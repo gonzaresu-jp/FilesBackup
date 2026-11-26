@@ -41,6 +41,15 @@ namespace FilesBackup.Services
         public static string ScheduleConfigPath => Path.Combine(ConfigDir, "schedule_config.json");
         public static string OptionsConfigPath => Path.Combine(ConfigDir, "options_config.json");
 
+        /// <summary>アプリ自体の設定（常駐・更新）は、管理者運用モードでもユーザーごとに保存する</summary>
+        public static string AppSettingsPath => Path.Combine(OverrideDir ?? UserDataDir, "app_settings.json");
+
+        /// <summary>アップデートの結果（更新後の起動時に読んで知らせる）</summary>
+        public static string UpdateResultPath => Path.Combine(OverrideDir ?? UserDataDir, "update_result.txt");
+
+        /// <summary>更新前の版の控え</summary>
+        public static string InstallBackupDir => Path.Combine(OverrideDir ?? UserDataDir, "InstallBackup");
+
         private static readonly string[] LegacyFiles =
         {
             "backup_config.json",

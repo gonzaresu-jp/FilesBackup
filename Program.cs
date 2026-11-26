@@ -25,8 +25,17 @@ namespace FilesBackup
             // 旧バージョンの保存先（exe と同じフォルダの Config）から設定を移行する
             AppPaths.MigrateLegacyConfig();
 
+            // 旧バージョンで肥大化した履歴ファイルを整理する（起動のたびに数百MBを読み込まないように）
+            Logger.CompactHistoryIfLarge();
+
             if (args.Length > 1 && args[1].Equals("auto", StringComparison.OrdinalIgnoreCase))
                 return RunAuto();
+
+            if (args.Length > 2 && args[1].Equals(MakeIconArg, StringComparison.OrdinalIgnoreCase))
+            {
+                UI.Theme.SaveIconFile(args[2]);
+                return 0;
+            }
 
             if (args.Length > 2 && args[1].Equals(ScreenshotsArg, StringComparison.OrdinalIgnoreCase))
             {
@@ -45,8 +54,13 @@ namespace FilesBackup
                 catch (AbandonedMutexException) { createdNew = true; }
             }
 
+            bool startInTray = args.Contains(StartupRegistration.TrayArg, StringComparer.OrdinalIgnoreCase);
+
             if (!createdNew)
             {
+                // サインイン時の自動起動で、すでに起動していれば何もしない
+                if (startInTray) return 0;
+
                 try
                 {
                     using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
@@ -65,9 +79,15 @@ namespace FilesBackup
             pipeThread.Start();
 
             ApplicationConfiguration.Initialize();
-            Application.Run(new Form1());
+            _mainForm = new Form1(startInTray: startInTray);
+            Application.Run(_mainForm);
             return 0;
         }
+
+        /// <summary>exe 用のアイコンファイルを書き出して終了する（--make-icon 保存先.ico）</summary>
+        private const string MakeIconArg = "--make-icon";
+
+        private static volatile Form1? _mainForm;
 
         /// <summary>
         /// タスク スケジューラからの自動実行。
@@ -155,15 +175,8 @@ namespace FilesBackup
                     int read = reader.Read(buffer, 0, buffer.Length);
                     string command = new string(buffer, 0, Math.Max(0, read)).Trim();
 
-                    if (command == ShowCommand && Application.OpenForms.Count > 0 && Application.OpenForms[0] is Form1 form)
-                    {
-                        form.Invoke(() =>
-                        {
-                            form.Show();
-                            form.WindowState = FormWindowState.Normal;
-                            form.BringToFront();
-                        });
-                    }
+                    if (command == ShowCommand && _mainForm is { IsHandleCreated: true } form)
+                        form.Invoke(form.ShowWindow);
                 }
                 catch
                 {

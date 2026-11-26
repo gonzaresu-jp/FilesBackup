@@ -43,6 +43,9 @@ internal static class Program
             ("履歴：記録とエラー数の上限", History),
             ("同時実行ロック", RunLockWorks),
             ("並列数の自動決定・使えない名前の分類・進捗の予定量", AutoParallelAndClassification),
+            ("アップデート：リリース情報の読み取り", UpdateReleaseParsing),
+            ("アプリ設定の保存", AppSettingsRoundTrip),
+            ("アップデート：ファイルの入れ替え", UpdateInstallerScript),
         };
 
         foreach (var (name, body) in tests)
@@ -505,6 +508,18 @@ internal static class Program
         Logger.AppendHistory(big);
         var reloaded = Logger.LoadHistory().Last();
         Check(reloaded.Errors == 5000 && reloaded.ErrorMessages.Count == 100, $"エラー内容は先頭100件だけ保存（{reloaded.ErrorMessages.Count}）");
+
+        // 旧バージョンが書いた肥大化した履歴（エラー内容を全件保存）を整理する
+        int count = Logger.LoadHistory().Count;
+        var bloated = Logger.LoadHistory();
+        bloated.Add(new BackupResult { Timestamp = DateTime.Now, Errors = 20000, ErrorMessages = Enumerable.Range(0, 20000).Select(i => $"old error {i} " + new string('x', 50)).ToList() });
+        File.WriteAllText(AppPaths.HistoryPath, System.Text.Json.JsonSerializer.Serialize(bloated));
+        long before = new FileInfo(AppPaths.HistoryPath).Length;
+        Logger.CompactHistoryIfLarge(thresholdBytes: 100_000);
+        long after = new FileInfo(AppPaths.HistoryPath).Length;
+        var compacted = Logger.LoadHistory();
+        Check(after < before / 10 && compacted.Count == count + 1 && compacted.Last().Errors == 20000,
+            $"大きすぎる履歴を整理（{before / 1024} KB → {after / 1024} KB、件数と集計はそのまま）");
     }
 
     private static void AutoParallelAndClassification()
@@ -532,6 +547,92 @@ internal static class Program
     private sealed class SyncProgress<T>(Action<T> action) : IProgress<T>
     {
         public void Report(T value) => action(value);
+    }
+
+    private static void UpdateReleaseParsing()
+    {
+        Check(UpdateService.ParseTag("v2.1.0") == new Version(2, 1, 0) && UpdateService.ParseTag("2.3") == new Version(2, 3, 0),
+            "タグをバージョンとして読む（v2.1.0、2.3）");
+        Check(UpdateService.ParseTag("Backup") == null, "バージョンでないタグ（旧リリースの Backup）は無視");
+
+        const string sha = "2e39e407558020f4c16290ae60c1e0e8df269cb3722a0f72b32df37b9c6da05a";
+        string json = """
+            {
+              "tag_name": "v9.9.9", "name": "FilesBackup v9.9.9", "draft": false, "prerelease": false,
+              "html_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/tag/v9.9.9",
+              "body": "- 新機能\r\n- 修正",
+              "assets": [
+                { "name": "FilesBackup.zip", "size": 1234, "digest": "sha256:SHA",
+                  "browser_download_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/download/v9.9.9/FilesBackup.zip" },
+                { "name": "FilesBackup.zip.sha256", "size": 80,
+                  "browser_download_url": "https://github.com/gonzaresu-jp/FilesBackup/releases/download/v9.9.9/FilesBackup.zip.sha256" }
+              ]
+            }
+            """.Replace("SHA", sha);
+        var info = UpdateService.ParseRelease(json);
+        Check(info != null && info.Version == new Version(9, 9, 9) && info.ZipUrl.EndsWith("FilesBackup.zip")
+              && info.ShaUrl!.EndsWith(".sha256") && info.Sha256 == sha && info.Size == 1234,
+            "zip・ハッシュ・サイズを読み取る");
+
+        Check(UpdateService.ParseRelease(json.Replace("\"prerelease\": false", "\"prerelease\": true")) == null, "プレリリースは対象外");
+        Check(UpdateService.ParseRelease(json.Replace("FilesBackup.zip\"", "Other.zip\"")) == null, "FilesBackup の zip が無ければ対象外");
+
+        Check(UpdateService.IsTrustedUrl("https://github.com/gonzaresu-jp/FilesBackup/releases/download/v1/FilesBackup.zip")
+              && UpdateService.IsTrustedUrl("https://objects.githubusercontent.com/x"), "GitHub の HTTPS は許可");
+        Check(!UpdateService.IsTrustedUrl("http://github.com/x") && !UpdateService.IsTrustedUrl("https://example.com/FilesBackup.zip")
+              && !UpdateService.IsTrustedUrl("https://github.com.evil.example/x"), "それ以外の取得先は拒否");
+
+        Check(UpdateService.ParseSha256($"{sha.ToUpperInvariant()}  FilesBackup.zip") == sha, "ハッシュファイルを読む");
+    }
+
+    // 入れ替えスクリプトを、一時フォルダの「インストール先」と偽の更新ファイルで実際に動かす（アプリは起動しない）
+    private static void UpdateInstallerScript()
+    {
+        string install = D("t30install");
+        F(Path.Combine(install, "FilesBackup.exe"), "old exe");
+        F(Path.Combine(install, "FilesBackup.dll"), "old dll");
+        F(Path.Combine(install, "Config", "backup_config.json"), "legacy config");
+
+        string pkg = D("t30pkg");
+        F(Path.Combine(pkg, "FilesBackup", "FilesBackup.exe"), "new exe");
+        F(Path.Combine(pkg, "FilesBackup", "FilesBackup.dll"), "new dll");
+        F(Path.Combine(pkg, "FilesBackup", "ja", "res.dll"), "new resource");
+        F(Path.Combine(pkg, "FilesBackup", "Config", "backup_config.json"), "should not overwrite");
+
+        string work = D("t30work");
+        string zip = Path.Combine(work, "update.zip");
+        System.IO.Compression.ZipFile.CreateFromDirectory(pkg, zip);
+        string script = Path.Combine(work, "install_update.ps1");
+        File.WriteAllText(script, UpdateService.InstallerScript, new System.Text.UTF8Encoding(true));
+        string backup = Path.Combine(work, "backup");
+        string result = Path.Combine(work, "result.txt");
+
+        var psi = new ProcessStartInfo("powershell.exe",
+            $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\" -Zip \"{zip}\" -InstallDir \"{install}\" " +
+            $"-ProcessId 999999 -BackupDir \"{backup}\" -ResultPath \"{result}\" -ProcessName FilesBackupTestDummy -NoRestart")
+        { UseShellExecute = false, CreateNoWindow = true };
+        using (var p = Process.Start(psi)!) p.WaitForExit(120_000);
+
+        string text = File.Exists(result) ? File.ReadAllText(result).Trim() : "(結果なし)";
+        Check(text.StartsWith("OK"), $"入れ替えが成功（{text}）");
+        Check(File.ReadAllText(Path.Combine(install, "FilesBackup.exe")) == "new exe"
+              && File.ReadAllText(Path.Combine(install, "ja", "res.dll")) == "new resource", "新しいファイルに入れ替わる");
+        Check(File.ReadAllText(Path.Combine(install, "Config", "backup_config.json")) == "legacy config", "Config フォルダは上書きしない");
+        Check(File.ReadAllText(Path.Combine(backup, "FilesBackup.exe")) == "old exe" && !Directory.Exists(Path.Combine(backup, "Config")),
+            "更新前のファイルを控えとして保存");
+    }
+
+    private static void AppSettingsRoundTrip()
+    {
+        var defaults = ConfigStore.LoadAppSettings();
+        Check(defaults.StartWithWindows && defaults.AutoCheckUpdates, "既定は常駐・自動確認とも有効");
+
+        ConfigStore.SaveAppSettings(new AppSettings { StartWithWindows = false, SkippedVersion = "9.9.9", LastUpdateCheck = new DateTime(2026, 11, 26) });
+        var loaded = ConfigStore.LoadAppSettings();
+        Check(!loaded.StartWithWindows && loaded.SkippedVersion == "9.9.9" && loaded.LastUpdateCheck == new DateTime(2026, 11, 26),
+            "保存した内容を読み込める");
+        Check(StartupRegistration.CommandFor(@"C:\Program Files\FilesBackup\FilesBackup.exe")
+              == "\"C:\\Program Files\\FilesBackup\\FilesBackup.exe\" --tray", "自動起動のコマンド（トレイで起動）");
     }
 
     private static void RunLockWorks()
