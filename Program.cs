@@ -129,16 +129,29 @@ namespace FilesBackup
                 {
                     Tasks = ConfigStore.LoadTasks(),
                     Options = ConfigStore.LoadOptions(),
+
+                    // スリープ復帰直後や NAS の起動待ちで、ネットワークの共有にすぐつながらないことがあるので少し待つ
+                    NetworkWait = TimeSpan.FromMinutes(10),
                 };
                 manager.ApplyIgnore(ConfigStore.LoadIgnore());
 
                 var result = manager.ExecuteAllWithResult(trigger: "auto");
+                int postponed = result.TaskResults.Count(t => t.Status == "延期");
 
                 title = "バックアップ完了";
                 text = $"コピー: {result.FilesCopied}件, スキップ: {result.FilesSkipped}件";
                 if (result.FilesDeleted > 0) text += $", 削除: {result.FilesDeleted}件";
                 if (result.Errors > 0) text += $", エラー: {result.Errors}件";
                 icon = result.Errors > 0 ? ToolTipIcon.Warning : ToolTipIcon.Info;
+
+                if (postponed > 0)
+                {
+                    // 接続できなかった設定がある。終了コード 1 でタスク スケジューラに失敗として残す
+                    title = "一部のバックアップを延期しました";
+                    text = $"接続できない保存先があります（{postponed}件）。" + text;
+                    icon = ToolTipIcon.Warning;
+                    exitCode = 1;
+                }
 
                 Logger.Info("=== 自動バックアップ終了 ===");
             }

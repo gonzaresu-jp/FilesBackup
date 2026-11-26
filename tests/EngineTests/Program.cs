@@ -46,6 +46,11 @@ internal static class Program
             ("アップデート：リリース情報の読み取り", UpdateReleaseParsing),
             ("アプリ設定の保存", AppSettingsRoundTrip),
             ("アップデート：ファイルの入れ替え", UpdateInstallerScript),
+            ("世代管理：上書き・ミラー削除の前の版を残す", VersionsKept),
+            ("名前の変換：NAS で使えない名前", SafeNames),
+            ("接続できないコピー先は延期", UnreachableDestinationPostponed),
+            ("ネットワークドライブの読み替え", NetworkDriveResolve),
+            ("オンラインのみのファイルの判定・コピー後の確認", OnlineOnlyAndVerify),
         };
 
         foreach (var (name, body) in tests)
@@ -98,6 +103,134 @@ internal static class Program
         };
         m.ApplyIgnore(ignore ?? new IgnoreConfig());
         return m;
+    }
+
+    private static char UnusedDriveLetter()
+    {
+        var used = DriveInfo.GetDrives().Select(d => char.ToUpperInvariant(d.Name[0])).ToHashSet();
+        return "BGIJKLMNOSTUVW".First(c => !used.Contains(c));
+    }
+
+    // ================= 2.4.0 で追加した機能 =================
+
+    private static void VersionsKept()
+    {
+        string src = D("v_src"), dst = D("v_dst");
+        var t0 = DateTime.UtcNow.AddHours(-2);
+        F(Path.Combine(src, "a.txt"), "v1", t0);
+        F(Path.Combine(src, "sub", "b.txt"), "keep", t0);
+        F(Path.Combine(src, BackupManager.VersionsFolderName, "x.txt"), "do not copy", t0);
+        var opt = new BackupOptions { MirrorMode = true, KeepVersions = true, VersionRetentionDays = 30 };
+
+        M(new[] { (src, dst) }, options: opt).ExecuteAllWithResult();
+        Check(!Directory.Exists(Path.Combine(dst, BackupManager.VersionsFolderName)), "初回は前の版なし・コピー元の版フォルダはコピーしない");
+
+        // 更新と削除
+        F(Path.Combine(src, "a.txt"), "v2", DateTime.UtcNow);
+        File.Delete(Path.Combine(src, "sub", "b.txt"));
+        // 保持期間を過ぎた古い版
+        string old = Path.Combine(dst, BackupManager.VersionsFolderName, "2000-01-01_000000");
+        F(Path.Combine(old, "old.txt"), "old");
+
+        var r = M(new[] { (src, dst) }, options: opt).ExecuteAllWithResult();
+        string vroot = Path.Combine(dst, BackupManager.VersionsFolderName);
+        var stamps = Directory.GetDirectories(vroot);
+        Check(File.ReadAllText(Path.Combine(dst, "a.txt")) == "v2", "新しい内容で上書き");
+        Check(stamps.Length == 1 && File.ReadAllText(Path.Combine(stamps[0], "a.txt")) == "v1", "上書き前の版を残す");
+        Check(!File.Exists(Path.Combine(dst, "sub", "b.txt")) && File.Exists(Path.Combine(stamps[0], "sub", "b.txt")),
+              "ミラーで消すファイルは前の版として移す");
+        Check(!Directory.Exists(old), "保持期間を過ぎた版は削除");
+        Check((File.GetAttributes(vroot) & FileAttributes.Hidden) != 0, "版フォルダは隠しフォルダ");
+        Check(r.Errors == 0 && r.TaskResults[0].Message.Contains("前の版"), "結果に前の版の件数");
+
+        // 3回目：版フォルダはミラーで消されない
+        M(new[] { (src, dst) }, options: opt).ExecuteAllWithResult();
+        Check(Directory.Exists(vroot) && File.Exists(Path.Combine(stamps[0], "a.txt")), "版フォルダはミラーで消さない");
+
+        // 世代管理オフ
+        string dst2 = D("v_dst2");
+        var off = new BackupOptions { KeepVersions = false };
+        M(new[] { (src, dst2) }, options: off).ExecuteAllWithResult();
+        F(Path.Combine(src, "a.txt"), "v3", DateTime.UtcNow.AddMinutes(1));
+        M(new[] { (src, dst2) }, options: off).ExecuteAllWithResult();
+        Check(!Directory.Exists(Path.Combine(dst2, BackupManager.VersionsFolderName)), "オフなら前の版を残さない");
+    }
+
+    private static void SafeNames()
+    {
+        Check(BackupManager.SafeDestName("report.txt") == "report.txt", "使える名前はそのまま");
+        Check(BackupManager.SafeDestName("a?b.") == "a_b_", "使えない文字と末尾のピリオド");
+        Check(BackupManager.SafeDestName("name ") == "name_", "末尾の空白");
+
+        string longName = new string('あ', 100) + ".txt";   // UTF-8 で 304 バイト
+        string safe = BackupManager.SafeDestName(longName);
+        Check(System.Text.Encoding.UTF8.GetByteCount(safe) <= 255 && safe.EndsWith(".txt") && safe.Contains('~'), "長すぎる名前は縮めて識別子を付ける");
+        Check(safe == BackupManager.SafeDestName(longName), "同じ名前は毎回同じ変換");
+        Check(safe != BackupManager.SafeDestName(new string('あ', 99) + "い.txt"), "違う名前は違う変換");
+
+        string emoji = string.Concat(Enumerable.Repeat("😀", 70));
+        string safeEmoji = BackupManager.SafeDestName(emoji);
+        Check(System.Text.Encoding.UTF8.GetByteCount(safeEmoji) <= 255 && !char.IsHighSurrogate(safeEmoji[safeEmoji.IndexOf('~') - 1]),
+              "サロゲートペアを分断しない");
+
+        // 実際のコピー（ローカルで変換を強制）
+        string src = D("n_src"), dst = D("n_dst");
+        string longDir = new string('い', 90);
+        F(Path.Combine(src, longName), "x");
+        F(Path.Combine(src, longDir, "inner.txt"), "y");
+        var opt = new BackupOptions { MirrorMode = true };
+        var m = M(new[] { (src, dst) }, options: opt);
+        m.ConvertNamesOverride = true;
+        var r1 = m.ExecuteAllWithResult();
+        Check(r1.Errors == 0 && File.Exists(Path.Combine(dst, safe)) && !File.Exists(Path.Combine(dst, longName)), "変換した名前で保存");
+        Check(File.Exists(Path.Combine(dst, BackupManager.SafeDestName(longDir), "inner.txt")), "フォルダ名も変換");
+
+        var m2 = M(new[] { (src, dst) }, options: opt);
+        m2.ConvertNamesOverride = true;
+        var r2 = m2.ExecuteAllWithResult();
+        Check(r2.FilesCopied == 0 && r2.FilesDeleted == 0 && File.Exists(Path.Combine(dst, safe)), "2回目はコピーせず、ミラーでも消さない");
+    }
+
+    private static void UnreachableDestinationPostponed()
+    {
+        string src = D("u_src");
+        for (int i = 0; i < 20; i++) F(Path.Combine(src, $"f{i}.txt"));
+        char free = UnusedDriveLetter();
+        var r = M(new[] { (src, $"{free}:\\backup") }).ExecuteAllWithResult();
+        Check(r.TaskResults[0].Status == "延期", "状態は延期");
+        Check(r.Errors == 1 && r.FilesCopied == 0, "ファイルごとのエラーにしない");
+    }
+
+    private static void NetworkDriveResolve()
+    {
+        char free = UnusedDriveLetter();
+        var saved = NetworkPaths.Remembered.ToDictionary(kv => kv.Key, kv => kv.Value);
+        try
+        {
+            NetworkPaths.SetRemembered(new Dictionary<string, string> { [free.ToString()] = @"\\nas-test\share" });
+            Check(NetworkPaths.Resolve($@"{free}:\photos\2024") == @"\\nas-test\share\photos\2024", "覚えた割り当てで UNC に読み替え");
+            Check(NetworkPaths.Resolve($@"{free}:\") == @"\\nas-test\share\", "ドライブ直下");
+            string local = Path.Combine(_root, "x");
+            Check(NetworkPaths.Resolve(local) == local, "ローカルのパスはそのまま");
+            Check(File.Exists(AppPaths.NetworkDrivesPath), "割り当てを保存");
+        }
+        finally
+        {
+            NetworkPaths.SetRemembered(saved);
+        }
+    }
+
+    private static void OnlineOnlyAndVerify()
+    {
+        Check(BackupManager.IsOnlineOnly((FileAttributes)0x00400000), "RECALL_ON_DATA_ACCESS はオンラインのみ");
+        Check(BackupManager.IsOnlineOnly((FileAttributes)0x00040000), "RECALL_ON_OPEN はオンラインのみ");
+        Check(BackupManager.IsOnlineOnly(FileAttributes.Offline), "Offline はオンラインのみ");
+        Check(!BackupManager.IsOnlineOnly(FileAttributes.Archive | FileAttributes.ReadOnly), "通常のファイルは対象外");
+
+        string src = D("vf_src"), dst = D("vf_dst");
+        F(Path.Combine(src, "a.bin"), new string('z', 100_000));
+        var r = M(new[] { (src, dst) }, options: new BackupOptions { VerifyAfterCopy = true }).ExecuteAllWithResult();
+        Check(r.FilesCopied == 1 && r.Errors == 0, "コピー後の確認つきでコピー");
     }
 
     private static void Junction(string link, string target)
@@ -408,7 +541,7 @@ internal static class Program
         var m = M(new[] { (Path.Combine(_root, "missing"), Path.Combine(_root, "t15ok")), (src, $"{free}:\\backup") });
         var report = m.Validate();
         Check(report.Warnings.Any(w => w.Contains("コピー元が見つかりません")), "コピー元が無ければ注意");
-        Check(report.Errors.Any(e => e.Contains("ドライブが見つかりません")), "コピー先のドライブが無ければエラー");
+        Check(report.Errors.Any(e => e.Contains("コピー先に接続できません")), "コピー先のドライブが無ければエラー");
         Check(!report.Errors.Any(e => e.Contains("t15ok")), "書き込めるコピー先はエラーにしない");
     }
 

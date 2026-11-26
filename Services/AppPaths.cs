@@ -50,6 +50,12 @@ namespace FilesBackup.Services
         /// <summary>アップデートの結果（更新後の起動時に読んで知らせる）</summary>
         public static string UpdateResultPath => Path.Combine(OverrideDir ?? UserDataDir, "update_result.txt");
 
+        /// <summary>
+        /// ネットワークドライブの割り当て（Z: → \\server\share）の控え。
+        /// 管理者権限のタスクやサインイン前の実行では割り当てが見えないため、普段の起動時に覚えておく
+        /// </summary>
+        public static string NetworkDrivesPath => Path.Combine(OverrideDir ?? UserDataDir, "network_drives.json");
+
         /// <summary>更新前の版の控え</summary>
         public static string InstallBackupDir => Path.Combine(OverrideDir ?? UserDataDir, "InstallBackup");
 

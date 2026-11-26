@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -269,6 +269,7 @@ namespace FilesBackup
             AddView("schedule", BuildSchedule());
             AddView("ignore", BuildIgnore());
             AddView("settings:general", BuildSettingsGeneral());
+            AddView("settings:protection", BuildSettingsProtection());
             AddView("settings:storage", BuildSettingsStorage());
             AddView("settings:transfer", BuildSettingsTransfer());
             AddView("settings:privilege", BuildSettingsPrivilege());
@@ -614,6 +615,7 @@ namespace FilesBackup
                         SideEntry.Item("general", Glyph.Brush, "一般"),
                         SideEntry.Item("update", Glyph.Download, "アップデート", _update != null ? "新しい版" : "",
                             countColor: _update != null ? Theme.Accent : null),
+                        SideEntry.Item("protection", Glyph.History, "保護とネットワーク", _options.KeepVersions ? "" : "オフ"),
                         SideEntry.Item("storage", Glyph.Storage, "保存先", AppPaths.IsMachineMode ? "共通" : ""),
                         SideEntry.Item("transfer", Glyph.Export, "インポート/エクスポート"),
                         SideEntry.Item("privilege", Glyph.Shield, "実行権限", IsElevated ? "管理者" : ""),
@@ -800,7 +802,7 @@ namespace FilesBackup
                 var done = _history.LastOrDefault(h => !h.Cancelled) ?? last;
                 tileCopied.Value = $"{done.FilesCopied:N0} 件";
                 tileCopied.Sub = $"{FormatBytes(done.BytesCopied)} ・ {done.Timestamp:MM/dd}";
-                int attention = done.TaskResults.Count(t => t.Status is "容量不足" or "エラー" || t.Status.StartsWith("スキップ"));
+                int attention = done.TaskResults.Count(t => t.Status is "容量不足" or "エラー" or "延期" || t.Status.StartsWith("スキップ"));
                 tileErrors.Value = $"{done.Errors:N0} 件";
                 tileErrors.ValueColor = done.Errors > 0 ? Theme.Danger : Theme.Success;
                 tileErrors.Sub = attention > 0 ? $"要確認の設定 {attention} 件" : "問題はありません";
@@ -1527,7 +1529,7 @@ namespace FilesBackup
         private static string HistoryState(BackupResult h)
         {
             if (h.Cancelled) return "cancel";
-            bool attention = h.Errors > 0 || h.TaskResults.Any(t => t.Status is "容量不足" or "エラー" || t.Status.StartsWith("スキップ"));
+            bool attention = h.Errors > 0 || h.TaskResults.Any(t => t.Status is "容量不足" or "エラー" or "延期" || t.Status.StartsWith("スキップ"));
             return attention ? "warn" : "ok";
         }
 
@@ -2185,6 +2187,98 @@ namespace FilesBackup
             return page;
         }
 
+        private static readonly int[] RetentionChoices = { 7, 14, 30, 60, 90, 180, 365 };
+
+        private Control BuildSettingsProtection()
+        {
+            var page = NewPage();
+            page.Controls.Add(new PageHeader("保護とネットワーク", "手動実行とスケジュールによる自動実行の両方に適用されます（変更はすぐに保存されます）"));
+
+            // 世代管理
+            var versions = new Card("前の版を残す（世代管理）",
+                "コピー元のファイルが壊れたり、ランサムウェアで暗号化されたりしても、上書きされる前の版から戻せます");
+            var tglVersions = Toggle("上書き・削除する前のファイルを残す",
+                $"コピー先の {BackupManager.VersionsFolderName}\\日時\\ に移します（隠しフォルダ）。ミラーモードで削除するファイルも、ここに移します");
+            var cmbRetention = Combo(RetentionChoices.Select(d => $"{d} 日"), 110);
+            var retentionRow = new RowPanel { Height = S(36), BackColor = Theme.Card };
+            retentionRow.AddLeft(Label("保持する期間", width: 120));
+            retentionRow.AddLeft(cmbRetention);
+            retentionRow.AddFill(Label("これより古い版は、次のバックアップのときに削除します", ThemedLabel.Style.Small, 20));
+            versions.Add(tglVersions, retentionRow);
+            page.Controls.Add(versions);
+
+            // ネットワークドライブ
+            var network = new Card("ネットワークドライブ（NAS）",
+                "Z: などの割り当てを覚えておき、管理者権限の自動実行でも \\\\サーバー\\共有 として使います");
+            var lblDrives = Label("", ThemedLabel.Style.Small, 20);
+            void ShowDrives()
+            {
+                var map = NetworkPaths.Remembered;
+                lblDrives.Text = map.Count == 0
+                    ? "覚えているネットワークドライブはありません"
+                    : "覚えている割り当て: " + string.Join("、", map.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}: = {kv.Value}"));
+                lblDrives.Height = S(20 * Math.Max(1, (lblDrives.Text.Length + 79) / 80));
+            }
+            var driveRow = new RowPanel { Height = S(40), BackColor = Theme.Card };
+            driveRow.AddLeft(Btn("割り当てを読み込み直す", Glyph.Refresh, click: async (s, e) =>
+            {
+                await System.Threading.Tasks.Task.Run(NetworkPaths.Remember);
+                ShowDrives();
+            }));
+            var tglNames = Toggle("NAS で使えない名前を、使える名前に変えて保存する",
+                "長すぎる名前や末尾のピリオドなど。名前の先頭を残して ~識別子 を付けます（ログに記録）");
+            network.Add(lblDrives, driveRow, tglNames,
+                Label("接続できない場合は、ファイルごとのエラーにせず「延期」にします。スケジュール実行では最大 10 分、接続を待ちます", ThemedLabel.Style.Small, 20),
+                Label("認証が必要な NAS は、Windows の「資格情報マネージャー」にユーザー名とパスワードを登録してください", ThemedLabel.Style.Small, 20));
+            page.Controls.Add(network);
+
+            // クラウドの同期フォルダ
+            var cloud = new Card("OneDrive・Google ドライブ",
+                "「オンラインのみ」のファイル（クラウドにだけあり、PC にはまだ無いファイル）の扱いです");
+            var tglOnline = Toggle("オンラインのみのファイルもダウンロードしてコピーする",
+                "オフ（おすすめ）：スキップします。オン：読むたびにダウンロードが始まるので、ディスクと回線を大量に使うことがあります");
+            cloud.Add(tglOnline);
+            page.Controls.Add(cloud);
+
+            // 検証
+            var verify = new Card("コピーの確認");
+            var tglVerify = Toggle("コピーした後に、内容が一致するか確かめる",
+                "コピー元とコピー先を読み直して SHA-256 で比べます。確実になりますが、コピーにかかる時間が増えます");
+            verify.Add(tglVerify);
+            page.Controls.Add(verify);
+
+            _loading = true;
+            tglVersions.Checked = _options.KeepVersions;
+            int idx = Array.IndexOf(RetentionChoices, _options.VersionRetentionDays);
+            cmbRetention.SelectedIndex = idx >= 0 ? idx : Array.IndexOf(RetentionChoices, 30);
+            cmbRetention.Enabled = _options.KeepVersions;
+            tglNames.Checked = _options.FixUnsupportedNames;
+            tglOnline.Checked = _options.DownloadOnlineOnlyFiles;
+            tglVerify.Checked = _options.VerifyAfterCopy;
+            ShowDrives();
+            _loading = false;
+
+            tglVersions.CheckedChanged += (s, e) =>
+            {
+                if (_loading) return;
+                _options.KeepVersions = tglVersions.Checked;
+                cmbRetention.Enabled = tglVersions.Checked;
+                SaveOptions();
+                RefreshSide();
+            };
+            cmbRetention.SelectedIndexChanged += (s, e) =>
+            {
+                if (_loading || cmbRetention.SelectedIndex < 0) return;
+                _options.VersionRetentionDays = RetentionChoices[cmbRetention.SelectedIndex];
+                SaveOptions();
+            };
+            tglNames.CheckedChanged += (s, e) => { if (!_loading) { _options.FixUnsupportedNames = tglNames.Checked; SaveOptions(); } };
+            tglOnline.CheckedChanged += (s, e) => { if (!_loading) { _options.DownloadOnlineOnlyFiles = tglOnline.Checked; SaveOptions(); } };
+            tglVerify.CheckedChanged += (s, e) => { if (!_loading) { _options.VerifyAfterCopy = tglVerify.Checked; SaveOptions(); } };
+
+            return page;
+        }
+
         private Control BuildSettingsStorage()
         {
             var page = NewPage();
@@ -2591,6 +2685,9 @@ namespace FilesBackup
                 catch (Exception ex) { Logger.Error("自動起動の登録に失敗しました", ex); }
             }
 
+            // ネットワークドライブの割り当てを覚えておく（管理者権限のスケジュール実行では割り当てが見えないため）
+            await System.Threading.Tasks.Task.Run(NetworkPaths.Remember);
+
             // アップデートの結果を知らせる
             string? updateResult = UpdateService.TakeResult();
             if (updateResult != null)
@@ -2830,6 +2927,7 @@ namespace FilesBackup
                 ("ignore", "all", "ignore.png"),
                 ("history", "all", "history.png"),
                 ("settings", "storage", "settings.png"),
+                ("settings", "protection", "protection.png"),
             };
 
             Theme.Set(false);
@@ -2910,7 +3008,7 @@ namespace FilesBackup
             if (last == null) return (Glyph.Circle, Theme.TextMuted);
 
             var t = last.Value.Item2;
-            if (t.Status is "容量不足" or "エラー" || t.Status.StartsWith("スキップ") || t.Errors > 0)
+            if (t.Status is "容量不足" or "エラー" or "延期" || t.Status.StartsWith("スキップ") || t.Errors > 0)
                 return (Glyph.Warning, Theme.Warning);
             if (t.Status == "中止")
                 return (Glyph.Stop, Theme.TextMuted);
