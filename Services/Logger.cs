@@ -88,9 +88,18 @@ namespace FilesBackup.Services
                             h.ErrorMessages = h.ErrorMessages.Take(MaxErrorMessagesPerEntry).ToList();
                     }
 
-                    string temp = AppPaths.HistoryPath + ".tmp";
-                    File.WriteAllText(temp, JsonSerializer.Serialize(history, HistoryJsonOptions));
-                    File.Move(temp, AppPaths.HistoryPath, overwrite: true);
+                    string json = JsonSerializer.Serialize(history, HistoryJsonOptions);
+                    if (AppPaths.IsMachineMode)
+                    {
+                        // 管理者運用モードでは、置き換えるとファイルに付けた書き込み許可が消えるため、そのまま上書きする
+                        File.WriteAllText(AppPaths.HistoryPath, json);
+                    }
+                    else
+                    {
+                        string temp = AppPaths.HistoryPath + ".tmp";
+                        File.WriteAllText(temp, json);
+                        File.Move(temp, AppPaths.HistoryPath, overwrite: true);
+                    }
                 }
                 catch { }
             }

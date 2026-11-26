@@ -11,8 +11,11 @@ namespace FilesBackup
         private const string PipeName = "FilesBackupPipe";
         private const string ShowCommand = "SHOW";
 
-        /// <summary>「管理者として再起動」で起動されたことを示す引数</summary>
-        public const string ElevatedRestartArg = "--elevated-restart";
+        /// <summary>アプリ自身による再起動（管理者として再起動・保存先の切り替え）で起動されたことを示す引数</summary>
+        public const string RestartArg = "--restart";
+
+        /// <summary>README 用の画面写真を保存して終了する（--screenshots フォルダ）</summary>
+        private const string ScreenshotsArg = "--screenshots";
 
         [STAThread]
         static int Main()
@@ -25,11 +28,18 @@ namespace FilesBackup
             if (args.Length > 1 && args[1].Equals("auto", StringComparison.OrdinalIgnoreCase))
                 return RunAuto();
 
+            if (args.Length > 2 && args[1].Equals(ScreenshotsArg, StringComparison.OrdinalIgnoreCase))
+            {
+                ApplicationConfiguration.Initialize();
+                Application.Run(new Form1(screenshotDir: args[2]));
+                return 0;
+            }
+
             bool createdNew;
             using Mutex mutex = new(true, MutexName, out createdNew);
 
-            // 管理者として再起動した場合は、元のプロセスが終了するのを待ってから起動する
-            if (!createdNew && args.Contains(ElevatedRestartArg, StringComparer.OrdinalIgnoreCase))
+            // アプリ自身が再起動した場合は、元のプロセスが終了するのを待ってから起動する
+            if (!createdNew && args.Contains(RestartArg, StringComparer.OrdinalIgnoreCase))
             {
                 try { createdNew = mutex.WaitOne(TimeSpan.FromSeconds(15)); }
                 catch (AbandonedMutexException) { createdNew = true; }
@@ -112,7 +122,7 @@ namespace FilesBackup
             {
                 using var notifyIcon = new NotifyIcon
                 {
-                    Icon = SystemIcons.Application,
+                    Icon = UI.Theme.CreateAppIcon(),
                     Visible = true,
                     BalloonTipTitle = title,
                     BalloonTipText = text.Length > 250 ? text[..250] : text,

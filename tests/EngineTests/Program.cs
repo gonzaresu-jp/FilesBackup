@@ -42,6 +42,7 @@ internal static class Program
             ("スケジュール：取りこぼし判定", MissedRunDetection),
             ("履歴：記録とエラー数の上限", History),
             ("同時実行ロック", RunLockWorks),
+            ("並列数の自動決定・使えない名前の分類・進捗の予定量", AutoParallelAndClassification),
         };
 
         foreach (var (name, body) in tests)
@@ -504,6 +505,33 @@ internal static class Program
         Logger.AppendHistory(big);
         var reloaded = Logger.LoadHistory().Last();
         Check(reloaded.Errors == 5000 && reloaded.ErrorMessages.Count == 100, $"エラー内容は先頭100件だけ保存（{reloaded.ErrorMessages.Count}）");
+    }
+
+    private static void AutoParallelAndClassification()
+    {
+        string sysRoot = Path.GetPathRoot(Environment.SystemDirectory)!;
+        var kind = DriveProbe.Detect(sysRoot);
+        int dop = DriveProbe.SuggestParallelism(sysRoot, sysRoot, out string why);
+        Check(dop is >= 1 and <= 4 && why.Contains("→"), $"ドライブの種類から並列数を決める（{DriveProbe.Label(kind)} → {dop}）");
+        Check(DriveProbe.Detect(@"\\server\share\x") == DriveProbe.Kind.Network, "UNC パスはネットワーク");
+
+        Check(BackupManager.IsUnsupportedNameError(new IOException("x", unchecked((int)0x8007007B))), "ERROR_INVALID_NAME は使えない名前");
+        Check(BackupManager.IsUnsupportedNameError(new IOException("x", unchecked((int)0x800700CE))), "ERROR_FILENAME_EXCED_RANGE は使えない名前");
+        Check(BackupManager.IsUnsupportedNameError(new PathTooLongException()), "パスが長すぎるものは使えない名前");
+        Check(!BackupManager.IsUnsupportedNameError(new IOException("x", unchecked((int)0x80070020))), "共有違反は別扱い");
+
+        string src = D("t20src"), dst = Path.Combine(_root, "t20dst");
+        for (int i = 0; i < 30; i++) F(Path.Combine(src, $"f{i}.bin"), new string('z', 1000));
+        long lastPlanned = 0;
+        var progress = new SyncProgress<BackupProgress>(p => lastPlanned = Math.Max(lastPlanned, p.BytesPlanned));
+        var r = M(new[] { (src, dst) }).ExecuteAllWithResult(progress: progress);
+        Check(r.FilesCopied == 30 && lastPlanned == 30_000, $"進捗にコピー予定量を含める（{lastPlanned}B）");
+    }
+
+    // 呼び出したスレッドでそのまま通知する（Progress<T> はスレッドプールに送るため、テストでは順序が読めない）
+    private sealed class SyncProgress<T>(Action<T> action) : IProgress<T>
+    {
+        public void Report(T value) => action(value);
     }
 
     private static void RunLockWorks()

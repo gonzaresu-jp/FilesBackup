@@ -12,4 +12,10 @@
       </requestedPrivileges>
     </security>
   </trustInfo>
+  <!-- 260 文字を超えるパスを扱えるようにする（Windows の「長いパス」設定が有効な場合） -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
 </assembly>

@@ -15,7 +15,7 @@ namespace FilesBackup.Models
         /// <summary>時刻だけ新しく内容が同じファイルはコピーしない（SHA-256 で比較）</summary>
         public bool CompareByHash { get; set; } = false;
 
-        /// <summary>並列コピー数（HDD は 1、SSD や NAS は 2〜4 程度が目安）</summary>
-        public int MaxDegreeOfParallelism { get; set; } = 2;
+        /// <summary>並列コピー数。0 は自動（コピー元・コピー先のドライブの種類から決める：HDD は 1、SSD・NAS は 4）</summary>
+        public int MaxDegreeOfParallelism { get; set; } = 0;
     }
 }

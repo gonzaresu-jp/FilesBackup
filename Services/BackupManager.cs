@@ -18,6 +18,7 @@ namespace FilesBackup.Services
         int EstimatedTotal,
         int Copied,
         long BytesCopied,
+        long BytesPlanned,
         int Deleted,
         string Current);
 
@@ -29,6 +30,7 @@ namespace FilesBackup.Services
         private const int ChunkSize = 100_000;                              // まとめてコピーする件数（メモリ使用量の上限）
         private const long FreeSpaceMargin = 512L * 1024 * 1024;            // 空き容量の余裕
         private const int MaxStoredErrors = 1000;                           // 保持するエラーメッセージ数
+        private const int MaxLoggedErrorsPerTask = 200;                     // 1つの設定でログに詳細を書くエラー数
         private static readonly TimeSpan TimestampTolerance = TimeSpan.FromSeconds(2);   // NAS/FAT の時刻精度差を吸収
         private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(200);
 
@@ -388,8 +390,8 @@ namespace FilesBackup.Services
 
         private sealed class Counters
         {
-            public int Scanned, Copied, Skipped, Deleted, Errors, UnreadableDirs, LinksSkipped;
-            public long Bytes;
+            public int Scanned, Copied, Skipped, Deleted, Errors, UnreadableDirs, LinksSkipped, UnsupportedNames;
+            public long Bytes, PlannedBytes;
         }
 
         private readonly record struct PlanItem(string Relative, long Size, long ExistingSize);
@@ -436,7 +438,21 @@ namespace FilesBackup.Services
                 return;
             }
 
-            Logger.Info($"処理中: {src} -> {dst}{(mirror ? "（ミラーモード）" : "")}{(dryRun ? "（プレビュー）" : "")}");
+            // 並列数：0 は自動（ドライブの種類から決める）
+            int dop;
+            string dopNote;
+            if (Options.MaxDegreeOfParallelism > 0)
+            {
+                dop = Math.Clamp(Options.MaxDegreeOfParallelism, 1, 8);
+                dopNote = $"並列数 {dop}";
+            }
+            else
+            {
+                dop = DriveProbe.SuggestParallelism(src, dst, out string why);
+                dopNote = $"並列数 自動→{dop}（{why}）";
+            }
+
+            Logger.Info($"処理中: {src} -> {dst}（{dopNote}）{(mirror ? "（ミラーモード）" : "")}{(dryRun ? "（プレビュー）" : "")}");
 
             var c = new Counters();
             var chunk = new List<PlanItem>();
@@ -452,7 +468,7 @@ namespace FilesBackup.Services
                 if (!force && now - Interlocked.Read(ref _lastProgressTicks) < ProgressInterval.TotalMilliseconds) return;
                 Interlocked.Exchange(ref _lastProgressTicks, now);
                 progress.Report(new BackupProgress(phase, taskLabel, c.Scanned, estimate,
-                    Volatile.Read(ref c.Copied), Interlocked.Read(ref c.Bytes), c.Deleted, current));
+                    Volatile.Read(ref c.Copied), Interlocked.Read(ref c.Bytes), Interlocked.Read(ref c.PlannedBytes), c.Deleted, current));
             }
 
             // コピー予定をまとめてコピーする。容量不足なら false
@@ -481,7 +497,7 @@ namespace FilesBackup.Services
                     return true;
                 }
 
-                CopyChunk(src, dst, chunk, c, ct, Report);
+                CopyChunk(src, dst, chunk, dop, c, ct, Report);
                 chunk.Clear();
                 return true;
             }
@@ -572,6 +588,7 @@ namespace FilesBackup.Services
                     if (needsCopy)
                     {
                         chunk.Add(new PlanItem(isRoot ? file.Name : Path.Combine(rel, file.Name), file.Length, existing?.Length ?? 0));
+                        Interlocked.Add(ref c.PlannedBytes, file.Length);
                         if (chunk.Count >= ChunkSize && !Flush())
                         {
                             stoppedForSpace = true;
@@ -645,8 +662,15 @@ namespace FilesBackup.Services
             tr.Errors += c.Errors;
             if (string.IsNullOrEmpty(tr.Status))
                 tr.Status = c.Errors > 0 ? "完了（エラーあり）" : "完了";
-            if (c.UnreadableDirs > 0 && string.IsNullOrEmpty(tr.Message))
-                tr.Message = $"読み取れないフォルダ {c.UnreadableDirs} 件をスキップ";
+            var notes = new List<string>();
+            if (!string.IsNullOrEmpty(tr.Message)) notes.Add(tr.Message);
+            if (c.UnsupportedNames > 0)
+                notes.Add($"コピー先で使えない名前のファイル {c.UnsupportedNames:N0} 件（NAS などは名前の長さや使える文字に制限があります）");
+            if (c.UnreadableDirs > 0)
+                notes.Add($"読み取れないフォルダ {c.UnreadableDirs:N0} 件をスキップ");
+            if (c.Errors > MaxLoggedErrorsPerTask)
+                notes.Add($"エラーが多いため、ログには先頭 {MaxLoggedErrorsPerTask} 件だけ詳細を記録");
+            tr.Message = string.Join(" / ", notes);
 
             Report(BackupPhase.Copying, "", force: true);
             Logger.Info($"完了: コピー{c.Copied}件, スキップ{c.Skipped}件" +
@@ -656,12 +680,24 @@ namespace FilesBackup.Services
                         (dryRun ? "（プレビュー）" : ""));
         }
 
-        private void CopyChunk(string srcRoot, string dstRoot, List<PlanItem> items, Counters c, CancellationToken ct,
+        /// <summary>
+        /// コピー先のファイルシステムが受け付けない名前か（NAS の名前の長さ・文字の制限、長すぎるパスなど）。
+        /// 何度やり直しても成功しないため、他のエラーと分けて集計する。
+        /// </summary>
+        public static bool IsUnsupportedNameError(Exception ex)
+        {
+            if (ex is PathTooLongException) return true;
+            if (ex is not IOException) return false;
+            int code = ex.HResult & 0xFFFF;
+            return code == 123 /* ERROR_INVALID_NAME */ || code == 206 /* ERROR_FILENAME_EXCED_RANGE */;
+        }
+
+        private void CopyChunk(string srcRoot, string dstRoot, List<PlanItem> items, int dop, Counters c, CancellationToken ct,
                                Action<BackupPhase, string, bool> report)
         {
             var options = new ParallelOptions
             {
-                MaxDegreeOfParallelism = Math.Clamp(Options.MaxDegreeOfParallelism, 1, 8),
+                MaxDegreeOfParallelism = Math.Clamp(dop, 1, 8),
                 CancellationToken = ct,
             };
 
@@ -681,9 +717,16 @@ namespace FilesBackup.Services
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        Interlocked.Increment(ref c.Errors);
-                        RecordError($"{s} -> {ex.Message}");
-                        Logger.Error($"コピーエラー: {s}", ex);
+                        int n = Interlocked.Increment(ref c.Errors);
+                        bool badName = IsUnsupportedNameError(ex);
+                        if (badName) Interlocked.Increment(ref c.UnsupportedNames);
+                        RecordError($"{s} -> {(badName ? "コピー先で使えない名前: " : "")}{ex.Message}");
+
+                        // 同じ原因のエラーが大量に出てもログが肥大化しないよう、詳細は先頭だけ書く（件数は集計する）
+                        if (n <= MaxLoggedErrorsPerTask)
+                            Logger.Error($"コピーエラー: {s}", ex);
+                        else if (n == MaxLoggedErrorsPerTask + 1)
+                            Logger.Warn("エラーが多いため、以降のエラーはログへの記録を省略します（件数は集計します）");
                     }
 
                     report(BackupPhase.Copying, s, false);
